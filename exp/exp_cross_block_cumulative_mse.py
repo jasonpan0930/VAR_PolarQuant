@@ -188,7 +188,7 @@ def collect_baseline_block_outputs_and_indices(
         return out
 
     var_mod.sample_with_top_k_top_p_ = _record_sampler
-    var.enable_polar_k_cache(False)
+    var.set_polar_quant(None)
     try:
         run_infer(var, label_B, device=device)
     finally:
@@ -234,7 +234,7 @@ def compute_method_block_metrics(
     for i, block in enumerate(var.blocks):
         hooks.append(block.register_forward_hook(make_hook(i)))
 
-    var.enable_polar_k_cache(True, dump_session=None, polar_quant=method)
+    var.set_polar_quant(method)
     run_infer(var, label_B, device=device, forced_stage_indices=forced_stage_indices)
 
     for h in hooks:

@@ -46,10 +46,10 @@ def save_tensor_image(recon: torch.Tensor, path: Path) -> None:
 
 
 def run_infer(var, label_B: torch.Tensor, use_polar: bool, dump=None):
-    var.enable_polar_k_cache(use_polar, dump_session=dump if use_polar else None, theta2_quant=THETA2_QUANT)
-    if use_polar and DUMP_BLOCKS is not None:
-        for bi, block in enumerate(var.blocks):
-            block.attn._polar_dump = dump if bi in DUMP_BLOCKS else None
+    if use_polar:
+        var.set_polar_quant(THETA2_QUANT)
+    else:
+        var.set_polar_quant(None)
     torch.manual_seed(SEED)
     random.seed(SEED)
     np.random.seed(SEED)

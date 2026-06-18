@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.helpers import DropPath, drop_path
+from utils.angle_quant import PolarQuantConfig
 from utils.polar_kv_quant import PolarK64Batch, PolarKVCache
 
 
@@ -19,7 +20,6 @@ try:
     from flash_attn.ops.layer_norm import dropout_add_layer_norm
     from flash_attn.ops.fused_dense import fused_mlp_func
 except ImportError: pass
-# automatically import faster attention implementations
 try: from xformers.ops import memory_efficient_attention
 except ImportError: pass
 try: from flash_attn import flash_attn_func              # qkv: BLHc, ret: BLHcq
@@ -44,19 +44,16 @@ class FFN(nn.Module):
         self.drop = nn.Dropout(drop, inplace=True) if drop > 0 else nn.Identity()
     
     def forward(self, x):
-        rec = getattr(self, '_fc2_recorder', None)
-        if rec is not None:
-            h = self.act(self.fc1(x))
-            rec.record_fc2_input(h)
-            return self.drop(self.fc2(h))
         if self.fused_mlp_func is not None:
             return self.drop(self.fused_mlp_func(
-                x=x, weight1=self.fc1.weight, weight2=self.fc2.weight, bias1=self.fc1.bias, bias2=self.fc2.bias,
-                activation='gelu_approx', save_pre_act=self.training, return_residual=False, checkpoint_lvl=0,
+                x=x, weight1=self.fc1.weight, weight2=self.fc2.weight,
+                bias1=self.fc1.bias, bias2=self.fc2.bias,
+                activation='gelu_approx', save_pre_act=self.training,
+                return_residual=False, checkpoint_lvl=0,
                 heuristic=0, process_group=None,
             ))
         else:
-            return self.drop(self.fc2( self.act(self.fc1(x)) ))
+            return self.drop(self.fc2(self.act(self.fc1(x))))
     
     def extra_repr(self) -> str:
         return f'fused_mlp_func={self.fused_mlp_func is not None}'
@@ -88,16 +85,47 @@ class SelfAttention(nn.Module):
         self.using_flash = flash_if_available and flash_attn_func is not None
         self.using_xform = flash_if_available and memory_efficient_attention is not None
         
-        # only used during inference
-        self.caching, self.cached_k, self.cached_v = False, None, None
-        self.use_polar_k_cache = False
+        # --- KV cache state (reset by kv_caching) ---
+        self.caching = False
+        self.polar_config: Optional[PolarQuantConfig] = None   # None = standard FP16 cache
+        self.cached_k = self.cached_v = None
         self.cached_k_polar: Optional[PolarKVCache] = None
+        
+        # --- Optional: angle statistics collector (set externally by experiment scripts) ---
+        self.angle_stats = None
     
-    def kv_caching(self, enable: bool, use_polar_k: bool = False):
+    def kv_caching(self, enable: bool, polar_config: Optional[PolarQuantConfig] = None):
+        """Enable/disable KV caching. Pass polar_config to enable polar K quantization."""
         self.caching = enable
-        self.use_polar_k_cache = bool(use_polar_k and enable)
-        self.cached_k, self.cached_v = None, None
-        self.cached_k_polar = PolarKVCache() if self.use_polar_k_cache else None
+        self.polar_config = polar_config if enable else None
+        self.cached_k = self.cached_v = None
+        self.cached_k_polar = PolarKVCache(config=polar_config) if polar_config is not None else None
+    
+    def _update_kv_cache(self, k, v, dim_cat, main_type):
+        """Update cache; return full K tensor (history + new) for attention."""
+        if self.polar_config is not None:
+            # Polar quantization: encode new K, decode full cache for attention
+            k_blhc = k if dim_cat == 1 else k.permute(0, 2, 1, 3)
+            polar_new = PolarK64Batch.from_k(k_blhc, config=self.polar_config)
+            self.cached_k_polar.append(polar_new)
+            k_decoded = self.cached_k_polar.decode_k(dtype=main_type)
+            k = k_decoded if dim_cat == 1 else k_decoded.permute(0, 2, 1, 3)
+            if self.angle_stats is not None:
+                self.angle_stats.record_k(k_blhc, block_idx=self.block_idx)
+            # V stays FP16 (not quantized)
+            if self.cached_v is None:
+                self.cached_v = v
+            else:
+                v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+        else:
+            # Standard FP16 cache (original VAR behavior)
+            if self.cached_k is None:
+                self.cached_k = k
+                self.cached_v = v
+            else:
+                k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat)
+                v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+        return k
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, attn_bias):
@@ -113,42 +141,12 @@ class SelfAttention(nn.Module):
         
         if self.attn_l2_norm:
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
-            if using_flash or self.using_xform: scale_mul = scale_mul.transpose(1, 2)  # 1H11 to 11H1
+            if using_flash or self.using_xform: scale_mul = scale_mul.transpose(1, 2)
             q = F.normalize(q, dim=-1).mul(scale_mul)
             k = F.normalize(k, dim=-1)
         
         if self.caching:
-            if self.use_polar_k_cache:
-                k_blhc = k if dim_cat == 1 else k.permute(0, 2, 1, 3)
-                polar_new = PolarK64Batch.from_k(k_blhc)
-                if self.cached_k_polar is None:
-                    self.cached_k_polar = PolarKVCache()
-                self.cached_k_polar.append(polar_new)
-                k_decoded = self.cached_k_polar.decode_k(dtype=main_type)
-                k = k_decoded if dim_cat == 1 else k_decoded.permute(0, 2, 1, 3)
-                if self.cached_v is None:
-                    self.cached_v = v
-                else:
-                    v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
-                dump = getattr(self, '_polar_dump', None)
-                if dump is not None:
-                    dump.on_k_cache_updated(self.block_idx, self.cached_k_polar, k_new=k_decoded)
-                angle_stats = getattr(self, '_polar_angle_stats', None)
-                if angle_stats is not None:
-                    angle_stats.record_k(k_blhc, block_idx=self.block_idx)
-            else:
-                if self.cached_k is None:
-                    self.cached_k = k
-                    self.cached_v = v
-                else:
-                    k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat)
-                    v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
-
-        # getattr(self, '_kv_recorder', None) 這行的意思是：試圖取得self物件上的'_kv_recorder'屬性，如果沒有這個屬性，則回傳None。
-        rec = getattr(self, '_kv_recorder', None)
- 
-        if rec is not None:
-            rec.record_kv(self, q, k, v, dim_cat=dim_cat)
+            k = self._update_kv_cache(k, v, dim_cat, main_type)
         
         dropout_p = self.attn_drop if self.training else 0.0
         if using_flash:
@@ -159,9 +157,6 @@ class SelfAttention(nn.Module):
             oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias, dropout_p=dropout_p).transpose(1, 2).reshape(B, L, C)
         
         return self.proj_drop(self.proj(oup))
-        # attn = (q @ k.transpose(-2, -1)).add_(attn_bias + self.local_rpb())  # BHLc @ BHcL => BHLL
-        # attn = self.attn_drop(attn.softmax(dim=-1))
-        # oup = (attn @ v).transpose_(1, 2).reshape(B, L, -1)     # BHLL @ BHLc = BHLc => BLHc => BLC
     
     def extra_repr(self) -> str:
         return f'using_flash={self.using_flash}, using_xform={self.using_xform}, attn_l2_norm={self.attn_l2_norm}'
@@ -193,11 +188,11 @@ class AdaLNSelfAttn(nn.Module):
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, cond_BD, attn_bias):   # C: embed_dim, D: cond_dim
         if self.shared_aln:
-            gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2) # 116C + B16C =unbind(2)=> 6 B1C
+            gamma1, gamma2, scale1, scale2, shift1, shift2 = (self.ada_gss + cond_BD).unbind(2)
         else:
             gamma1, gamma2, scale1, scale2, shift1, shift2 = self.ada_lin(cond_BD).view(-1, 1, 6, self.C).unbind(2)
-        x = x + self.drop_path(self.attn( self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias ).mul_(gamma1))
-        x = x + self.drop_path(self.ffn( self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2) ).mul(gamma2)) # this mul(gamma2) cannot be in-placed when FusedMLP is used
+        x = x + self.drop_path(self.attn(self.ln_wo_grad(x).mul(scale1.add(1)).add_(shift1), attn_bias=attn_bias).mul_(gamma1))
+        x = x + self.drop_path(self.ffn(self.ln_wo_grad(x).mul(scale2.add(1)).add_(shift2)).mul(gamma2))
         return x
     
     def extra_repr(self) -> str:

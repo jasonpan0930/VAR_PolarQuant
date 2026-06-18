@@ -33,8 +33,8 @@ import torch
 
 from models import build_vae_var
 from utils.angle_quant import (
+    POLAR_QUANT_CONFIGS,
     THETA2_UNIFORM_INT4,
-    get_polar_quant_config,
     register_theta2_kmeans_codebook,
 )
 from utils.polar_angle_viz import PolarAngleStatsSession, render_all_plots
@@ -104,8 +104,8 @@ def collect_theta2_mse(
         max_structured_tokens=256,
         batch_index=0,
     )
-    var.enable_polar_k_cache(True, dump_session=None, polar_quant=COLLECT_CONFIG)
-    var.enable_polar_angle_stats(angle_stats)
+    var.set_polar_quant(COLLECT_CONFIG)
+    var.set_angle_stats(angle_stats)
     torch.manual_seed(g_seed)
     random.seed(g_seed)
     np.random.seed(g_seed)
@@ -184,12 +184,12 @@ def run_k_error_plot(
         max_structured_tokens=256,
         batch_index=0,
     )
-    var.enable_polar_k_cache(True, dump_session=None, polar_quant=config_name)
-    var.enable_polar_angle_stats(angle_stats)
+    var.set_polar_quant(config_name)
+    var.set_angle_stats(angle_stats)
     torch.manual_seed(g_seed)
     random.seed(g_seed)
     np.random.seed(g_seed)
-    cfg_obj = get_polar_quant_config()
+    cfg_obj = POLAR_QUANT_CONFIGS.get(config_name, POLAR_QUANT_CONFIGS['uniform_int4'])
     print(f'--- {config_name}: {cfg_obj.label} -> {out_dir} ---')
     with torch.inference_mode():
         with torch.autocast('cuda', enabled=(device == 'cuda'), dtype=torch.float16):

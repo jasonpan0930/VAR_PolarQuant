@@ -19,12 +19,15 @@ from utils.polar_kv_quant import (
     polar_k64_error_breakdown,
 )
 from utils.angle_quant import (
+    DEFAULT_CONFIG,
+    POLAR_QUANT_CONFIGS,
+    PolarQuantConfig,
     dequantize_theta2_numpy,
-    get_polar_quant_config,
-    get_theta1_scheme,
-    get_theta2_scheme,
-    set_polar_quant_config,
+    resolve_config,
 )
+
+# Module-level config (used by visualization functions; set by caller)
+_config: PolarQuantConfig = DEFAULT_CONFIG
 
 THETA2_LAYER_SIZES = (16, 8, 4, 2, 1)
 THETA2_LAYER_NAMES = (
@@ -92,7 +95,7 @@ class PolarAngleStatsSession:
         if self.target_blocks is not None and block_idx not in self.target_blocks:
             return
         k = k_blhc[self.batch_index : self.batch_index + 1].float()
-        ang = encode_polar_k64_angles(k)
+        ang = encode_polar_k64_angles(k, config=_config)
         rec = {
             'stage_si': self.stage_si,
             'stage_pn': self.stage_pn,
@@ -140,7 +143,7 @@ class PolarAngleStatsSession:
         })
 
         k_flat = k[0].reshape(-1, HEAD_DIM)
-        bd = polar_k64_error_breakdown(k_flat)
+        bd = polar_k64_error_breakdown(k_flat, config=_config)
         n_vec = k_flat.shape[0]
         if n_vec > self.max_k_vectors:
             vidx = self._rng.choice(n_vec, size=self.max_k_vectors, replace=False)
@@ -211,26 +214,26 @@ def load_angles_from_npz(dump_dir: Path, block_idx: int = 15, max_files: int = 1
         data = np.load(f)
         if '_meta_json' in data:
             meta = json.loads(str(data['_meta_json']))
-            set_polar_quant_config(meta.get('polar_quant', meta.get('theta2_quant', 'uniform_int4')))
+            _config = resolve_config(meta.get('polar_quant', meta.get('theta2_quant', 'uniform_int4')))
         q1_all.append(data['q1'].reshape(-1))
         q2_all.append(data['q2'].reshape(-1))
     q1 = np.concatenate(q1_all)
     q2 = np.concatenate(q2_all)
-    theta1_hat = get_theta1_scheme().codebook_numpy()[q1.astype(np.int64).clip(0, get_theta1_scheme().num_bins - 1)]
+    theta1_hat = _config.theta1.codebook_numpy()[q1.astype(np.int64).clip(0, _config.theta1.num_bins - 1)]
     theta2_hat = dequantize_theta2_numpy(q2)
     return {'q1': q1, 'q2': q2, 'theta1_hat': theta1_hat, 'theta2_hat': theta2_hat}
 
 
 def _bin_centers_1() -> np.ndarray:
-    return get_theta1_scheme().codebook_numpy()
+    return _config.theta1.codebook_numpy()
 
 
 def _bin_centers_2() -> np.ndarray:
-    return get_theta2_scheme().codebook_numpy()
+    return _config.theta2.codebook_numpy()
 
 
 def _theta2_plot_meta() -> Tuple[str, np.ndarray, float]:
-    scheme = get_theta2_scheme()
+    scheme = _config.theta2
     centers = scheme.codebook_numpy()
     return scheme.label, scheme.bin_widths(), scheme.typical_step()
 
@@ -350,7 +353,7 @@ def plot_theta1_overview(data: Dict[str, np.ndarray], out_dir: Path, prefix: str
         print(f'saved {path}')
         return
 
-    q1_scheme = get_theta1_scheme()
+    q1_scheme = _config.theta1
     q1_step = q1_scheme.typical_step()
     q1_bins = q1_scheme.num_bins
     q1 = q1 if q1 is not None else np.argmin(
@@ -481,7 +484,7 @@ def plot_theta2_overview(data: Dict[str, np.ndarray], out_dir: Path, prefix: str
         ax.set_title('θ₂ after roundtrip')
 
     ax = axes[0, 1]
-    q2_scheme = get_theta2_scheme()
+    q2_scheme = _config.theta2
     q2_bins = q2_scheme.num_bins
     if q2 is not None:
         counts = np.bincount(q2.astype(np.int64).clip(0, q2_bins - 1), minlength=q2_bins)
@@ -595,7 +598,7 @@ def plot_theta1_per_index_struct(theta1: np.ndarray, theta1_hat: np.ndarray, out
         fig.suptitle('θ₁ quant error per pair index (32 first-polar pairs)', fontsize=12)
         for i in range(NUM_Q1):
             ax = axes[i // 8, i % 8]
-            ax.hist(err[:, i], bins=20, range=(-get_theta1_scheme().typical_step(), get_theta1_scheme().typical_step()), color='#4C72B0', alpha=0.85)
+            ax.hist(err[:, i], bins=20, range=(-_config.theta1.typical_step(), _config.theta1.typical_step()), color='#4C72B0', alpha=0.85)
             ax.axvline(0, color='k', lw=0.5)
             ax.set_title(f'i={i}', fontsize=7)
             ax.tick_params(labelsize=5)
@@ -617,7 +620,7 @@ def plot_theta1_per_index_struct(theta1: np.ndarray, theta1_hat: np.ndarray, out
 
 def plot_k_error_global(kerr: Dict[str, np.ndarray], out_dir: Path, prefix: str = '') -> None:
     """Global per-K-vector error histograms: NRMSE by stage + cosine similarity."""
-    cfg = get_polar_quant_config()
+    cfg = _config
     k_norm = np.maximum(kerr['k_norm'], 1e-12)
     cos_sim = kerr['cosine_sim_full']
 
@@ -705,7 +708,7 @@ def plot_k_error_global(kerr: Dict[str, np.ndarray], out_dir: Path, prefix: str 
 
 def plot_k_error_mse(kerr: Dict[str, np.ndarray], out_dir: Path, prefix: str = '') -> None:
     """Global per-K-vector absolute MSE distribution (3 stages overlaid)."""
-    cfg = get_polar_quant_config()
+    cfg = _config
     fig, ax = plt.subplots(figsize=(8, 5))
     fig.suptitle(
         f'K vector error propagation (64-dim, per token×head)\n{cfg.label}',

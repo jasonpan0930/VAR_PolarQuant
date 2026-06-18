@@ -94,7 +94,7 @@ def save_recon_png(recon: torch.Tensor, path: Path) -> None:
 def setup_polar(var, polar_quant: str, kmeans_codebook: Path) -> str:
     name = polar_quant.lower().strip()
     if name in ('none', 'baseline', 'fp16', 'off'):
-        var.enable_polar_k_cache(False)
+        var.set_polar_quant(None)
         return 'baseline_fp16_k'
     if name == 'int6_kmeans_int4':
         if not kmeans_codebook.is_file():
@@ -107,7 +107,7 @@ def setup_polar(var, polar_quant: str, kmeans_codebook: Path) -> str:
     elif name not in POLAR_QUANT_CONFIGS:
         opts = ', '.join(['none'] + sorted(POLAR_QUANT_CONFIGS) + ['int6_kmeans_int4'])
         raise ValueError(f'unknown --polar-quant {polar_quant!r}; choose: {opts}')
-    var.enable_polar_k_cache(True, dump_session=None, polar_quant=name)
+    var.set_polar_quant(name)
     return name
 
 

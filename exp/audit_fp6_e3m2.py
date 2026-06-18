@@ -1,5 +1,5 @@
 """
-Complete audit: INT6 θ₁ + FP6 E3M2 θ₂  (OCP MX Table 4)
+Complete audit: INT6 theta1 + FP6 E3M2 theta2  (OCP MX Table 4)
   cd VAR_polarQuant && python exp/audit_fp6_e3m2.py
 """
 import os, sys
@@ -14,11 +14,11 @@ from math import pi
 
 from utils.angle_quant import (
     _decode_ocp_fp, THETA2_FP6_E3M2, THETA1_INT6_UNIFORM,
-    set_polar_quant_config, POLAR_QUANT_CONFIGS,
+    POLAR_QUANT_CONFIGS,
 )
-from utils.polar_kv_quant import encode_polar_k64, decode_polar_k64, roundtrip_error
+from utils.polar_kv_quant import encode_polar_k64, decode_polar_k64, roundtrip_error, polar_k64_error_breakdown
 
-# ─── 1. OCP table spot checks (FP6 E3M2 bias=3) ───
+# --- 1. OCP table spot checks (FP6 E3M2 bias=3) ---
 E3M2_CASES = [
     # (label, bits, expected from OCP Table 4)
     ('+0.0',      0b000000, 0.0),
@@ -55,11 +55,11 @@ else:
     print('  *** DECODE FAILURE ***')
     raise SystemExit(1)
 
-# ─── 2. Codebook statistics (64 entries) ───
+# --- 2. Codebook statistics (64 entries) ---
 cb = THETA2_FP6_E3M2.codebook_numpy()
 cb_rounded = np.round(cb, 12)
 unique_angles = len(np.unique(cb_rounded))
-print(f'\n=== 2. θ₂ E3M2 codebook ({len(cb)} entries) ===')
+print(f'\n=== 2. theta2 E3M2 codebook ({len(cb)} entries) ===')
 print(f'  unique angles: {unique_angles}/64')
 print(f'  range: [{min(cb):.6f}, {max(cb):.6f}]  (expected [0, {pi/2:.4f}])')
 print(f'  code  0 (+0):       {cb[0]:.8f}')
@@ -76,53 +76,49 @@ print(f'  code 63 (-28.0):    {cb[63]:.8f}')
 if unique_angles != 32:
     print(f'  WARNING: expected 32 unique angles (sign folding), got {unique_angles}')
 
-# ─── 3. Config wiring ───
+# --- 3. Config wiring ---
 cfg = POLAR_QUANT_CONFIGS['fp6_e3m2']
 print(f'\n=== 3. Config {cfg.name} ===')
 print(f'  label: {cfg.label}')
-print(f'  θ₁: {cfg.theta1.name} ({cfg.theta1.label}) bins={cfg.theta1.num_bins}')
-print(f'  θ₂: {cfg.theta2.name} ({cfg.theta2.label}) bins={cfg.theta2.num_bins}')
-assert cfg.theta1.num_bins == 64, 'θ₁ must be 64-level INT6'
-assert cfg.theta2.num_bins == 64, 'θ₂ must be 64-level FP6'
+print(f'  theta1: {cfg.theta1.name} ({cfg.theta1.label}) bins={cfg.theta1.num_bins}')
+print(f'  theta2: {cfg.theta2.name} ({cfg.theta2.label}) bins={cfg.theta2.num_bins}')
+assert cfg.theta1.num_bins == 64, 'theta1 must be 64-level INT6'
+assert cfg.theta2.num_bins == 64, 'theta2 must be 64-level FP6'
 
-# ─── 4. Quantize / dequantize sanity for θ₂ ───
-set_polar_quant_config('fp6_e3m2')
-from utils.polar_kv_quant import quantize_theta2, dequantize_theta2
+# --- 4. Quantize / dequantize sanity for theta2 ---
 theta_test = torch.linspace(0, pi/2, 1001)
-q2 = quantize_theta2(theta_test)
-dq2 = dequantize_theta2(q2)
+q2 = cfg.theta2.quantize(theta_test)
+dq2 = cfg.theta2.dequantize(q2)
 err_max = float((theta_test - dq2).abs().max())
-print(f'\n=== 4. θ₂ roundtrip on linspace [0,π/2] ===')
+print(f'\n=== 4. theta2 roundtrip on linspace [0,pi/2] ===')
 print(f'  max recon error: {err_max:.6f} rad')
 print(f'  q2 used unique codes: {len(torch.unique(q2))} / 64')
 
-# ─── 5. Full polar roundtrip ───
+# --- 5. Full polar roundtrip ---
 k = torch.randn(16, 64)
-q1, q2, z = encode_polar_k64(k)
-k_hat = decode_polar_k64(q1, q2, z)
-rt = roundtrip_error(k[0])
+q1, q2, z = encode_polar_k64(k, config=cfg)
+k_hat = decode_polar_k64(q1, q2, z, config=cfg)
+rt = roundtrip_error(k[0], config=cfg)
 print(f'\n=== 5. Full polar roundtrip (random K) ===')
 print(f'  q1 range: [0, {int(q1.max())}]  q2 range: [0, {int(q2.max())}]')
 print(f'  K MSE: {rt["mse"]:.8f}  max|err|: {rt["max_abs"]:.6f}  mean|err|: {rt["mean_abs"]:.6f}')
 
 # Compare with uniform_int4
-set_polar_quant_config('uniform_int4')
-rt4 = roundtrip_error(k[0])
+cfg_uni = POLAR_QUANT_CONFIGS['uniform_int4']
+rt4 = roundtrip_error(k[0], config=cfg_uni)
 print(f'\n=== 6. Compare uniform_int4 (same K[0]) ===')
 print(f'  INT6+INT4  MSE: {rt4["mse"]:.8f}')
 print(f'  INT6+E3M2  MSE: {rt["mse"]:.8f}')
 print(f'  ratio E3M2 / INT4: {rt["mse"] / rt4["mse"]:.2f}x')
 
-# ─── 7. Stage breakdown ───
-set_polar_quant_config('fp6_e3m2')
-from utils.polar_kv_quant import polar_k64_error_breakdown
-bd = polar_k64_error_breakdown(k[:4])
+# --- 7. Stage breakdown ---
+bd = polar_k64_error_breakdown(k[:4], config=cfg)
 for stage in ['after_theta1', 'after_theta2', 'after_full']:
     m = bd[f'mse_{stage}'].mean().item()
     print(f'  {stage:20s} mean MSE = {m:.3e}')
 
 print('\n=== SUMMARY ===')
 print(f'  OCP decode: {"OK" if all_ok else "FAIL"}')
-print(f'  Config wiring: INT6 θ₁ + E2M3 θ₂ ✓')
-print(f'  Unique angles: {unique_angles} (expected ≤32 for sign-folded FP6)')
-print(f'  E3M2 full MSE / INT4 full MSE ≈ {rt["mse"]/rt4["mse"]:.2f}x')
+print(f'  Config wiring: INT6 theta1 + E2M3 theta2 check')
+print(f'  Unique angles: {unique_angles} (expected <=32 for sign-folded FP6)')
+print(f'  E3M2 full MSE / INT4 full MSE = {rt["mse"]/rt4["mse"]:.2f}x')

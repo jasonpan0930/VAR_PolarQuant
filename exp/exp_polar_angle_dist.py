@@ -29,7 +29,7 @@ import torch
 import torchvision
 
 from models import build_vae_var
-from utils.angle_quant import POLAR_QUANT_CONFIGS, get_polar_quant_config, register_theta2_kmeans_codebook
+from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook
 from utils.polar_angle_viz import PolarAngleStatsSession, render_all_plots
 from utils.theta2_kmeans import load_theta2_codebook
 
@@ -102,10 +102,10 @@ def run_config(var, label_B: torch.Tensor, config_name: str, out_dir: Path) -> N
         max_structured_tokens=256,
         batch_index=0,
     )
-    var.enable_polar_k_cache(True, dump_session=None, polar_quant=config_name)
-    var.enable_polar_angle_stats(angle_stats)
+    var.set_polar_quant(config_name)
+    var.set_angle_stats(angle_stats)
 
-    cfg = get_polar_quant_config()
+    cfg = POLAR_QUANT_CONFIGS[config_name]
     print(f'--- {config_name}: {cfg.label} -> {out_dir} ---')
     print('running polar inference to collect K errors...')
     recon = run_infer(var, label_B)
@@ -130,7 +130,7 @@ OUT_BASE.mkdir(parents=True, exist_ok=True)
 register_kmeans_theta2_from_codebook()
 
 print('running baseline (fp16 K cache)...')
-var.enable_polar_k_cache(False)
+var.set_polar_quant(None)
 save_tensor_image(run_infer(var, label_B), OUT_BASE / 'sample_original.png')
 
 for name in POLAR_QUANT_CONFIGS_TO_RUN:
