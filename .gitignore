@@ -9,12 +9,21 @@ _vis_cached/
 _auto_*
 ckpt/
 log/
+logs/
 tb*/
 img*/
 local_output*
+# polar quant experiment outputs (large)
+polar_quant_dumps/
+fc2_records/
+kv_records/
+fid_samples
+*.npz
+# model weights
 *.pth
 *.pth.tar
 *.ckpt
+# logs and notebooks
 *.log
 *.txt
 *.ipynb

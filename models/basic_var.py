@@ -1,10 +1,12 @@
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from models.helpers import DropPath, drop_path
+from utils.polar_kv_quant import PolarK64Batch, PolarKVCache
 
 
 # this file only provides the 3 blocks used in VAR transformer
@@ -42,6 +44,11 @@ class FFN(nn.Module):
         self.drop = nn.Dropout(drop, inplace=True) if drop > 0 else nn.Identity()
     
     def forward(self, x):
+        rec = getattr(self, '_fc2_recorder', None)
+        if rec is not None:
+            h = self.act(self.fc1(x))
+            rec.record_fc2_input(h)
+            return self.drop(self.fc2(h))
         if self.fused_mlp_func is not None:
             return self.drop(self.fused_mlp_func(
                 x=x, weight1=self.fc1.weight, weight2=self.fc2.weight, bias1=self.fc1.bias, bias2=self.fc2.bias,
@@ -83,8 +90,14 @@ class SelfAttention(nn.Module):
         
         # only used during inference
         self.caching, self.cached_k, self.cached_v = False, None, None
+        self.use_polar_k_cache = False
+        self.cached_k_polar: Optional[PolarKVCache] = None
     
-    def kv_caching(self, enable: bool): self.caching, self.cached_k, self.cached_v = enable, None, None
+    def kv_caching(self, enable: bool, use_polar_k: bool = False):
+        self.caching = enable
+        self.use_polar_k_cache = bool(use_polar_k and enable)
+        self.cached_k, self.cached_v = None, None
+        self.cached_k_polar = PolarKVCache() if self.use_polar_k_cache else None
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, attn_bias):
@@ -105,8 +118,37 @@ class SelfAttention(nn.Module):
             k = F.normalize(k, dim=-1)
         
         if self.caching:
-            if self.cached_k is None: self.cached_k = k; self.cached_v = v
-            else: k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat); v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+            if self.use_polar_k_cache:
+                k_blhc = k if dim_cat == 1 else k.permute(0, 2, 1, 3)
+                polar_new = PolarK64Batch.from_k(k_blhc)
+                if self.cached_k_polar is None:
+                    self.cached_k_polar = PolarKVCache()
+                self.cached_k_polar.append(polar_new)
+                k_decoded = self.cached_k_polar.decode_k(dtype=main_type)
+                k = k_decoded if dim_cat == 1 else k_decoded.permute(0, 2, 1, 3)
+                if self.cached_v is None:
+                    self.cached_v = v
+                else:
+                    v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+                dump = getattr(self, '_polar_dump', None)
+                if dump is not None:
+                    dump.on_k_cache_updated(self.block_idx, self.cached_k_polar, k_new=k_decoded)
+                angle_stats = getattr(self, '_polar_angle_stats', None)
+                if angle_stats is not None:
+                    angle_stats.record_k(k_blhc, block_idx=self.block_idx)
+            else:
+                if self.cached_k is None:
+                    self.cached_k = k
+                    self.cached_v = v
+                else:
+                    k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat)
+                    v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+
+        # getattr(self, '_kv_recorder', None) 這行的意思是：試圖取得self物件上的'_kv_recorder'屬性，如果沒有這個屬性，則回傳None。
+        rec = getattr(self, '_kv_recorder', None)
+ 
+        if rec is not None:
+            rec.record_kv(self, q, k, v, dim_cat=dim_cat)
         
         dropout_p = self.attn_drop if self.training else 0.0
         if using_flash:

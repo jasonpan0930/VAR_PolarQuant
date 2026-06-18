@@ -35,12 +35,15 @@ class VAR(nn.Module):
         
         self.cond_drop_rate = cond_drop_rate
         self.prog_si = -1   # progressive training
+        self.use_polar_k_cache = False
         
         self.patch_nums: Tuple[int] = patch_nums
         self.L = sum(pn ** 2 for pn in self.patch_nums)
         self.first_l = self.patch_nums[0] ** 2
         self.begin_ends = []
         cur = 0
+        # patch_nums: (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+        # begin_ends: [(0, 1), (1, 4), (4, 9), (9, 16), (16, 25), (25, 36), (36, 49), (49, 64), (64, 81), (81, 100)]
         for i, pn in enumerate(self.patch_nums):
             self.begin_ends.append((cur, cur+pn ** 2))
             cur += pn ** 2
@@ -156,8 +159,17 @@ class VAR(nn.Module):
         cur_L = 0
         f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
         
-        for b in self.blocks: b.attn.kv_caching(True)
+        for b in self.blocks:
+            b.attn.kv_caching(True, use_polar_k=getattr(self, 'use_polar_k_cache', False))
         for si, pn in enumerate(self.patch_nums):   # si: i-th segment
+            if getattr(self, '_kv_recorder', None) is not None:
+                self._kv_recorder.set_stage(si, pn)
+            if getattr(self, '_fc2_recorder', None) is not None:
+                self._fc2_recorder.set_stage(si, pn)
+            if getattr(self, '_polar_dump', None) is not None:
+                self._polar_dump.set_stage(si, pn)
+            if getattr(self, '_polar_angle_stats', None) is not None:
+                self._polar_angle_stats.set_stage(si, pn)
             ratio = si / self.num_stages_minus_1
             # last_L = cur_L
             cur_L += pn*pn
@@ -186,7 +198,11 @@ class VAR(nn.Module):
                 next_token_map = self.word_embed(next_token_map) + lvl_pos[:, cur_L:cur_L + self.patch_nums[si+1] ** 2]
                 next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         
-        for b in self.blocks: b.attn.kv_caching(False)
+        for b in self.blocks:
+            b.attn.kv_caching(False)
+        dump = getattr(self, '_polar_dump', None)
+        if dump is not None:
+            dump.save_manifest(extra={'B': B, 'cfg': cfg, 'use_polar_k_cache': getattr(self, 'use_polar_k_cache', False)})
         return self.vae_proxy[0].fhat_to_img(f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
     def forward(self, label_B: torch.LongTensor, x_BLCv_wo_first_l: torch.Tensor) -> torch.Tensor:  # returns logits_BLV
@@ -232,6 +248,25 @@ class VAR(nn.Module):
                         s += p.view(-1)[0] * 0
                 x_BLC[0, 0, 0] += s
         return x_BLC    # logits BLV, V is vocab_size
+    
+    def enable_polar_k_cache(
+        self, enable: bool = True, dump_session=None,
+        polar_quant: str = 'uniform_int4', theta2_quant: Optional[str] = None,
+    ) -> None:
+        """Enable hierarchical polar quant on K cache during autoregressive_infer_cfg."""
+        from utils.angle_quant import set_polar_quant_config
+        if enable:
+            set_polar_quant_config(theta2_quant or polar_quant)
+        self.use_polar_k_cache = enable
+        self._polar_dump = dump_session
+        for block in self.blocks:
+            block.attn._polar_dump = dump_session
+
+    def enable_polar_angle_stats(self, session) -> None:
+        """Attach angle collector to SelfAttention (used by exp_polar_angle_dist)."""
+        self._polar_angle_stats = session
+        for block in self.blocks:
+            block.attn._polar_angle_stats = session
     
     def init_weights(self, init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=0.02, conv_std_or_gain=0.02):
         if init_std < 0: init_std = (1 / self.C / 3) ** 0.5     # init_std < 0: automated
