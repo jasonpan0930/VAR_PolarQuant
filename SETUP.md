@@ -25,7 +25,7 @@ cd VAR_PolarQuant
 
 ## 2. Python Environment
 
-Choose one of the two options below.
+Choose **one** of the two options. Do **not** nest venv inside conda.
 
 ### Option A: Generic Linux (venv)
 
@@ -34,9 +34,9 @@ python3 -m venv venv
 source venv/bin/activate
 ```
 
-### Option B: NCHC Clusters (conda)
+### Option B: NCHC Clusters — 晶創25 / TWCC / 台灣杉 (conda only)
 
-晶創25 / TWCC / 台灣杉 use Slurm with `miniconda3` module.
+These clusters provide `miniconda3` via `module load`. Use **pure conda** — no extra `venv` layer.
 
 ```bash
 module load miniconda3
@@ -44,7 +44,17 @@ conda create -n var_env python=3.10 -y
 conda activate var_env
 ```
 
-> **Note**: Store the conda env under `/work/<user>` if `/home` quota is tight.
+In your SLURM job script, add the same two lines before running Python:
+```bash
+module load miniconda3
+conda activate var_env
+```
+
+> **Storage**: If `/home` quota is tight, create the conda env under `/work/<user>`:
+> ```bash
+> conda create -p /work/$USER/var_env python=3.10 -y
+> conda activate /work/$USER/var_env
+> ```
 
 ---
 
@@ -60,8 +70,11 @@ conda activate var_env
 
 ## 4. Install Python Dependencies
 
+Install **torch first** (Section 3), then the rest:
+
 ```bash
-pip install -r requirements.txt
+# Avoid requirements.txt downgrading torch — install deps manually or with --no-deps
+pip install -r requirements.txt --no-deps
 
 # Additional dependencies (not in requirements.txt)
 pip install matplotlib seaborn scikit-learn tensorflow tqdm
