@@ -102,7 +102,7 @@ class SelfAttention(nn.Module):
         self.cached_k_polar = PolarKVCache(config=polar_config) if polar_config is not None else None
     
     def _update_kv_cache(self, k, v, dim_cat, main_type):
-        """Update cache; return full K tensor (history + new) for attention."""
+        """Update cache; return full (K, V) tensors (history + new) for attention."""
         if self.polar_config is not None:
             # Polar quantization: encode new K, decode full cache for attention
             k_blhc = k if dim_cat == 1 else k.permute(0, 2, 1, 3)
@@ -125,7 +125,7 @@ class SelfAttention(nn.Module):
             else:
                 k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat)
                 v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
-        return k
+        return k, v
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, attn_bias):
@@ -146,7 +146,7 @@ class SelfAttention(nn.Module):
             k = F.normalize(k, dim=-1)
         
         if self.caching:
-            k = self._update_kv_cache(k, v, dim_cat, main_type)
+            k, v = self._update_kv_cache(k, v, dim_cat, main_type)
         
         dropout_p = self.attn_drop if self.training else 0.0
         if using_flash:
