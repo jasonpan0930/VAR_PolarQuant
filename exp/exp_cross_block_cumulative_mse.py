@@ -294,12 +294,19 @@ def compute_method_block_metrics(
     baseline_outputs: Dict[int, List[torch.Tensor]],
     forced_stage_indices: List[torch.Tensor],
     quant_v: bool = True,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (per_block_nmse, per_block_abs_mse, per_block_cosine_distance)."""
+    all_scales: bool = False,
+):
+    """Returns per-block metrics. If all_scales=True, each is (num_stages, num_blocks)."""
     num_stages = _num_ar_stages(var)
-    last_stage = num_stages - 1
-    accum = [BlockErrorAccumulator() for _ in range(len(var.blocks))]
-    call_idx = [0 for _ in range(len(var.blocks))]
+    num_blocks = len(var.blocks)
+
+    if all_scales:
+        # (num_stages, num_blocks) accumulators
+        accum_nmse = np.zeros((num_stages, num_blocks), dtype=np.float64)
+        accum_cos = np.zeros((num_stages, num_blocks), dtype=np.float64)
+    else:
+        accum = [BlockErrorAccumulator() for _ in range(num_blocks)]
+    call_idx = [0 for _ in range(num_blocks)]
     hooks = []
 
     def make_hook(block_idx: int):
@@ -308,14 +315,25 @@ def compute_method_block_metrics(
             ref_list = baseline_outputs[block_idx]
             if j >= len(ref_list):
                 raise RuntimeError(f"block {block_idx}: compare calls exceed baseline calls ({j} >= {len(ref_list)})")
-            if j == last_stage:
-                ref = ref_list[j]
-                cur = output.detach().float().cpu()
-                if cur.shape != ref.shape:
-                    raise RuntimeError(
-                        f"block {block_idx} stage {j}: shape mismatch {tuple(cur.shape)} vs {tuple(ref.shape)}"
-                    )
-                accum[block_idx].add(ref, cur)
+            ref = ref_list[j]
+            cur = output.detach().float().cpu()
+            if cur.shape != ref.shape:
+                raise RuntimeError(
+                    f"block {block_idx} stage {j}: shape mismatch {tuple(cur.shape)} vs {tuple(ref.shape)}"
+                )
+            if all_scales:
+                sse = float((cur - ref).pow(2).sum().item())
+                ref_norm = float(ref.pow(2).sum().item())
+                nmse = sse / max(ref_norm, 1e-12)
+                accum_nmse[j, block_idx] = 100.0 * math.sqrt(nmse)  # NRMSE %
+                dot = float((ref * cur).sum().item())
+                cur_norm = float(cur.pow(2).sum().item())
+                denom = math.sqrt(max(ref_norm, 0.0) * max(cur_norm, 0.0))
+                cos_sim = max(-1.0, min(1.0, dot / max(denom, 1e-12)))
+                accum_cos[j, block_idx] = 1.0 - cos_sim
+            else:
+                if j == num_stages - 1:
+                    accum[block_idx].add(ref, cur)
             call_idx[block_idx] += 1
         return _hook
 
@@ -328,20 +346,19 @@ def compute_method_block_metrics(
     for h in hooks:
         h.remove()
 
-    for i in range(len(var.blocks)):
+    for i in range(num_blocks):
         if call_idx[i] != num_stages:
-            raise RuntimeError(
-                f"block {i}: expected {num_stages} forwards, got {call_idx[i]}"
-            )
+            raise RuntimeError(f"block {i}: expected {num_stages} forwards, got {call_idx[i]}")
         if len(baseline_outputs[i]) != num_stages:
-            raise RuntimeError(
-                f"block {i}: baseline has {len(baseline_outputs[i])} stages, expected {num_stages}"
-            )
+            raise RuntimeError(f"block {i}: baseline has {len(baseline_outputs[i])} stages, expected {num_stages}")
 
-    nmse = np.array([a.nmse() for a in accum], dtype=np.float64)
-    abs_mse = np.array([a.abs_mse() for a in accum], dtype=np.float64)
-    cos_dist = np.array([a.cosine_distance() for a in accum], dtype=np.float64)
-    return nmse, abs_mse, cos_dist
+    if all_scales:
+        return accum_nmse, accum_cos
+    else:
+        nmse = np.array([a.nmse() for a in accum], dtype=np.float64)
+        abs_mse = np.array([a.abs_mse() for a in accum], dtype=np.float64)
+        cos_dist = np.array([a.cosine_distance() for a in accum], dtype=np.float64)
+        return nmse, abs_mse, cos_dist
 
 
 def depth_samples(depth: int, every: int) -> np.ndarray:
@@ -626,6 +643,11 @@ def main_forced(args) -> None:
     method_to_cos_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
     method_to_cum_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
 
+    # ── per-scale accumulators (all 10 scales) ──
+    method_ps_nrmse_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
+    method_ps_cos_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
+    method_ps_count: Dict[str, int] = {m: 0 for m in methods}
+
     for label in label_list:
         label_B = torch.tensor([label], device=device)
         print(f"[label={label}] collecting baseline block outputs and sampled token path...")
@@ -652,6 +674,19 @@ def main_forced(args) -> None:
             if args.cumulative:
                 method_to_cum_at_depth_sum[method] += np.cumsum(per_block_nmse)[sample_idx]
 
+            # ── per-scale block NRMSE & cosine (all 10 scales) ──
+            set_infer_seeds()
+            ps_nrmse, ps_cos = compute_method_block_metrics(
+                var, label_B, device=device, method=method,
+                baseline_outputs=baseline_outputs,
+                forced_stage_indices=baseline_stage_indices,
+                quant_v=quant_v,
+                all_scales=True,
+            )
+            method_ps_nrmse_sum[method] += ps_nrmse
+            method_ps_cos_sum[method] += ps_cos
+            method_ps_count[method] += 1
+
     n_labels = float(len(label_list))
     method_to_block_nmse: Dict[str, List[float]] = {m: (method_to_block_nmse_sum[m] / n_labels).tolist() for m in methods}
     method_to_block_nrmse_percent: Dict[str, List[float]] = {m: (method_to_block_nrmse_pct_sum[m] / n_labels).tolist() for m in methods}
@@ -660,6 +695,10 @@ def main_forced(args) -> None:
     method_to_abs_mse_at_depth: Dict[str, List[float]] = {m: (method_to_abs_at_depth_sum[m] / n_labels).tolist() for m in methods}
     method_to_block_cosine_distance: Dict[str, List[float]] = {m: (method_to_block_cos_sum[m] / n_labels).tolist() for m in methods}
     method_to_cosine_distance_at_depth: Dict[str, List[float]] = {m: (method_to_cos_at_depth_sum[m] / n_labels).tolist() for m in methods}
+
+    # ── per-scale averages ──
+    method_ps_nrmse: Dict[str, np.ndarray] = {m: method_ps_nrmse_sum[m] / max(method_ps_count[m], 1) for m in methods}
+    method_ps_cos: Dict[str, np.ndarray] = {m: method_ps_cos_sum[m] / max(method_ps_count[m], 1) for m in methods}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.out_prefix}_" if args.out_prefix else ""
@@ -680,6 +719,58 @@ def main_forced(args) -> None:
                 ylabel="Cosine distance at depth d",
                 title=f"1 - cos(h_quant, h_ref) at block output ({quant_mode})",
                 out_path=cos_fig_path)
+
+    # ── per-scale block NRMSE heatmaps (forced token path, one per method) ──
+    for method in methods:
+        hm_path = OUT_DIR / f"{prefix}heatmap_nrmse_{method}_{mode_suffix}_forced.png"
+        _plot_heatmap(
+            method_ps_nrmse[method],
+            ylabel="Scale",
+            title=f"Per-scale block NRMSE % ({method}, {quant_mode}, forced)",
+            out_path=hm_path,
+            num_stages=num_stages,
+            num_blocks=depth,
+            cbar_label="NRMSE (%)",
+        )
+        print(f"saved forced per-scale NRMSE heatmap -> {hm_path}")
+
+    # ── per-scale block cosine heatmaps (forced token path, one per method) ──
+    for method in methods:
+        cos_hm_path = OUT_DIR / f"{prefix}heatmap_cos_{method}_{mode_suffix}_forced.png"
+        _plot_heatmap(
+            method_ps_cos[method],
+            ylabel="Scale",
+            title=f"Per-scale block cos distance ({method}, {quant_mode}, forced)",
+            out_path=cos_hm_path,
+            num_stages=num_stages,
+            num_blocks=depth,
+            cbar_label="cosine distance",
+        )
+        print(f"saved forced per-scale cosine heatmap -> {cos_hm_path}")
+
+    # ── per-scale NRMSE line plots (forced, one per method) ──
+    for method in methods:
+        ps_line: Dict[int, List[float]] = {}
+        for si in range(num_stages):
+            ps_line[si] = method_ps_nrmse[method][si, :].tolist()
+        line_path = OUT_DIR / f"{prefix}perscale_nrmse_{method}_{mode_suffix}_forced.png"
+        _plot_per_scale_lines(
+            ps_line, depth, line_path,
+            method_label=method, ylabel="NRMSE (%)", quant_mode=f"{quant_mode}, forced",
+        )
+        print(f"saved forced per-scale NRMSE lines -> {line_path}")
+
+    # ── per-scale cosine line plots (forced, one per method) ──
+    for method in methods:
+        ps_line: Dict[int, List[float]] = {}
+        for si in range(num_stages):
+            ps_line[si] = method_ps_cos[method][si, :].tolist()
+        line_path = OUT_DIR / f"{prefix}perscale_cos_{method}_{mode_suffix}_forced.png"
+        _plot_per_scale_lines(
+            ps_line, depth, line_path,
+            method_label=method, ylabel="cosine distance", quant_mode=f"{quant_mode}, forced",
+        )
+        print(f"saved forced per-scale cosine lines -> {line_path}")
 
     json_path = OUT_DIR / f"{prefix}block_error_at_depth_{mode_suffix}_every4.json"
     payload = {
@@ -704,6 +795,8 @@ def main_forced(args) -> None:
         "nrmse_percent_at_depth_every_n": method_to_nrmse_percent_at_depth,
         "abs_mse_at_depth_every_n": method_to_abs_mse_at_depth,
         "cosine_distance_at_depth_every_n": method_to_cosine_distance_at_depth,
+        "per_scale_nrmse_forced": {m: method_ps_nrmse[m].tolist() for m in methods},
+        "per_scale_cos_forced": {m: method_ps_cos[m].tolist() for m in methods},
     }
     if args.cumulative:
         method_to_cum_at_depth: Dict[str, List[float]] = {m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in methods}
@@ -732,6 +825,18 @@ def main_forced(args) -> None:
         abs_m = method_to_abs_mse_at_depth[method][-1]
         cos_d = method_to_cosine_distance_at_depth[method][-1]
         print(f"  {method:20s}  NRMSE={nrmse_pct:.4f}%  abs_mse={abs_m:.6f}  cos_dist={cos_d:.6f}")
+
+    print(f"\nPer-scale block NRMSE summary ({quant_mode}, forced token path):")
+    for method in methods:
+        hm = method_ps_nrmse[method]
+        print(f"  {method:20s}  mean={hm.mean():.4f}%  max={hm.max():.4f}%  "
+              f"last_scale_mean={hm[-1,:].mean():.4f}%")
+
+    print(f"\nPer-scale block cosine distance summary ({quant_mode}, forced token path):")
+    for method in methods:
+        chm = method_ps_cos[method]
+        print(f"  {method:20s}  mean={chm.mean():.6f}  max={chm.max():.6f}  "
+              f"last_scale_mean={chm[-1,:].mean():.6f}")
 
 
 def main_free(args) -> None:
