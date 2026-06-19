@@ -777,6 +777,9 @@ def main_free(args) -> None:
     # H, W are determined from first f_hat snapshot (all f_hat snapshots are same spatial size)
     method_fhat_spatial_cos_sum: Dict[str, np.ndarray] = {m: None for m in methods}
     method_fhat_spatial_count: Dict[str, int] = {m: 0 for m in methods}
+    # VAE-decoded image comparison: PSNR and per-pixel NRMSE for scale-9 f_hat
+    method_decoded_psnr_sum: Dict[str, float] = {m: 0.0 for m in methods}
+    method_decoded_nrmse_sum: Dict[str, float] = {m: 0.0 for m in methods}
 
     for label in label_list:
         label_B = torch.tensor([label], device=device)
@@ -865,6 +868,22 @@ def main_free(args) -> None:
                     method_fhat_spatial_cos_sum[method][si] += spatial_cos_dist
             method_fhat_spatial_count[method] += 1
 
+            # ── VAE-decode scale-9 f_hat: pixel-level image comparison ──
+            bf9 = base_fhat[-1]   # (1, 32, 16, 16)
+            qf9 = quant_fhat[-1]
+            if bf9 is not None and qf9 is not None:
+                base_img = vae.fhat_to_img(bf9.to(device)).add_(1).mul_(0.5)  # (1, 3, 256, 256), [0,1]
+                quant_img = vae.fhat_to_img(qf9.to(device)).add_(1).mul_(0.5)
+                # PSNR
+                mse = (base_img - quant_img).pow(2).mean().item()
+                psnr = 20.0 * math.log10(1.0 / math.sqrt(max(mse, 1e-12)))
+                method_decoded_psnr_sum[method] += psnr
+                # NRMSE of decoded image
+                img_sse = (base_img - quant_img).pow(2).sum().item()
+                img_ref = base_img.pow(2).sum().item()
+                img_nrmse_pct = 100.0 * math.sqrt(img_sse / max(img_ref, 1e-12))
+                method_decoded_nrmse_sum[method] += img_nrmse_pct
+
     # ── average over labels ──
     n_labels = float(len(label_list))
     method_heatmap: Dict[str, np.ndarray] = {
@@ -893,6 +912,9 @@ def main_free(args) -> None:
         else:
             method_fhat_spatial[m] = np.zeros((num_stages, 1, 1))
             method_fhat_spatial_mean_per_scale[m] = [0.0] * num_stages
+    # VAE-decoded image metrics
+    method_decoded_psnr: Dict[str, float] = {m: method_decoded_psnr_sum[m] / n_labels for m in methods}
+    method_decoded_nrmse: Dict[str, float] = {m: method_decoded_nrmse_sum[m] / n_labels for m in methods}
 
     # ── save outputs ──
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -992,6 +1014,35 @@ def main_free(args) -> None:
     )
     print(f"saved f_hat spatial cos mean per scale -> {spat_mean_path}")
 
+    # VAE-decoded image PSNR bar chart
+    fig, ax = plt.subplots(figsize=(max(8, len(methods) * 0.8), 5.2))
+    x = np.arange(len(methods))
+    ax.bar(x, [method_decoded_psnr[m] for m in methods], color=plt.cm.tab10(np.linspace(0, 1, len(methods))))
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel("PSNR (dB)")
+    ax.set_title(f"VAE-decoded image PSNR vs baseline (scale 9 f_hat, {quant_mode})")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    decoded_psnr_path = OUT_DIR / f"{prefix}decoded_psnr_{mode_suffix}.png"
+    fig.savefig(decoded_psnr_path, dpi=180)
+    plt.close(fig)
+    print(f"saved decoded PSNR -> {decoded_psnr_path}")
+
+    # VAE-decoded image NRMSE bar chart
+    fig, ax = plt.subplots(figsize=(max(8, len(methods) * 0.8), 5.2))
+    ax.bar(x, [method_decoded_nrmse[m] for m in methods], color=plt.cm.tab10(np.linspace(0, 1, len(methods))))
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel("NRMSE (%)")
+    ax.set_title(f"VAE-decoded image NRMSE vs baseline (scale 9 f_hat, {quant_mode})")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    decoded_nrmse_path = OUT_DIR / f"{prefix}decoded_nrmse_{mode_suffix}.png"
+    fig.savefig(decoded_nrmse_path, dpi=180)
+    plt.close(fig)
+    print(f"saved decoded NRMSE -> {decoded_nrmse_path}")
+
     # JSON
     json_path = OUT_DIR / f"{prefix}free_running_metrics_{mode_suffix}.json"
     payload = {
@@ -1008,6 +1059,8 @@ def main_free(args) -> None:
             "fhat_cosine_distance_per_scale": "cosine distance of f_hat latent map at each scale",
             "fhat_spatial_cos_per_scale": "per-spatial-position f_hat cosine distance (num_stages, H, W), rows=scales, then H×W spatial",
             "fhat_spatial_cos_mean_per_scale": "mean per-position f_hat cosine distance per scale",
+            "decoded_psnr_scale9": "PSNR (dB) of VAE-decoded 256×256 image from scale-9 f_hat",
+            "decoded_nrmse_percent_scale9": "NRMSE (%) of VAE-decoded 256×256 image from scale-9 f_hat",
         },
         "heatmap_nrmse": {m: method_heatmap[m].tolist() for m in methods},
         "heatmap_cosine_distance": {m: method_cos_heatmap[m].tolist() for m in methods},
@@ -1016,6 +1069,8 @@ def main_free(args) -> None:
         "fhat_cosine_distance_per_scale": method_fhat_cos,
         "fhat_spatial_cos_per_scale": {m: method_fhat_spatial[m].tolist() for m in methods},
         "fhat_spatial_cos_mean_per_scale": method_fhat_spatial_mean_per_scale,
+        "decoded_psnr_scale9": method_decoded_psnr,
+        "decoded_nrmse_percent_scale9": method_decoded_nrmse,
     }
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True, indent=2)
@@ -1069,6 +1124,15 @@ def main_free(args) -> None:
         smap = method_fhat_spatial[method][-1]  # last scale, (H, W)
         print(f"  {method:20s}  mean={smap.mean():.6f}  max={smap.max():.6f}  "
               f"min={smap.min():.6f}  H={smap.shape[0]} W={smap.shape[1]}")
+
+    print(f"\nVAE-decoded image comparison (scale 9 f_hat → 256×256 image, {quant_mode}, free-running):")
+    print(f"{'method':>25s}  {'PSNR':>8s}  {'pixel NRMSE':>12s}  {'signal vs latent':>35s}")
+    for method in methods:
+        psnr = method_decoded_psnr[method]
+        nrmse = method_decoded_nrmse[method]
+        signal = (f"f_hat cos={method_fhat_cos[method][-1]:.3f}"
+                  if method_fhat_cos[method][-1] is not None else "N/A")
+        print(f"  {method:25s}  {psnr:>6.2f} dB  {nrmse:>10.2f}%  {signal}")
 
 
 if __name__ == "__main__":
