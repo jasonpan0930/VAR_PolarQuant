@@ -410,10 +410,12 @@ def _plot_heatmap(
     num_stages: int,
     num_blocks: int,
     xlabel: str = "Block depth",
+    cbar_label: str = "NRMSE (%)",
+    cmap: str = "YlOrRd",
 ) -> None:
     """Plot a 2D heatmap: rows = scales, cols = blocks."""
     fig, ax = plt.subplots(figsize=(max(8, num_blocks * 0.28), max(4, num_stages * 0.45)))
-    im = ax.imshow(data, aspect="auto", origin="upper", cmap="YlOrRd", vmin=0)
+    im = ax.imshow(data, aspect="auto", origin="upper", cmap=cmap, vmin=0)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -422,7 +424,7 @@ def _plot_heatmap(
     ax.set_yticks(range(num_stages))
     ax.set_yticklabels([f"scale {s}" for s in range(num_stages)], fontsize=8)
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("NRMSE (%)")
+    cbar.set_label(cbar_label)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
@@ -455,20 +457,21 @@ def _plot_token_disagree(
     plt.close(fig)
 
 
-def _plot_fhat_nrmse(
-    fhat_nrmse_pct: Dict[str, List[float]],
+def _plot_fhat_metric(
+    fhat_vals: Dict[str, List[float]],
     num_stages: int,
     out_path: Path,
+    ylabel: str = "f_hat NRMSE (%)",
     quant_mode: str = "KV",
 ) -> None:
-    """Line plot: f_hat NRMSE (%) per scale."""
+    """Line plot: f_hat metric per scale."""
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     x = list(range(num_stages))
-    for method, vals in fhat_nrmse_pct.items():
+    for method, vals in fhat_vals.items():
         ax.plot(x, vals, marker="o", linewidth=2.0, label=method)
     ax.set_xlabel("Scale")
-    ax.set_ylabel("f_hat NRMSE (%)")
-    ax.set_title(f"f_hat NRMSE per scale (free-running, {quant_mode} quant)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"{ylabel} (free-running, {quant_mode} quant)")
     ax.grid(True, alpha=0.25)
     ax.legend()
     fig.tight_layout()
@@ -477,23 +480,24 @@ def _plot_fhat_nrmse(
 
 
 def _plot_per_scale_lines(
-    nrmse_by_scale: Dict[int, List[float]],
+    vals_by_scale: Dict[int, List[float]],
     num_blocks: int,
     out_path: Path,
     method_label: str,
+    ylabel: str = "NRMSE (%)",
     quant_mode: str = "KV",
 ) -> None:
-    """Per-scale line plot: NRMSE vs block depth for each scale."""
+    """Per-scale line plot: metric vs block depth for each scale."""
     fig, ax = plt.subplots(figsize=(8.4, 5.2))
     x = list(range(1, num_blocks + 1))
-    colors = plt.cm.viridis(np.linspace(0, 1, len(nrmse_by_scale)))
-    for si in sorted(nrmse_by_scale.keys()):
+    colors = plt.cm.viridis(np.linspace(0, 1, len(vals_by_scale)))
+    for si in sorted(vals_by_scale.keys()):
         color = colors[si] if si < len(colors) else None
-        ax.plot(x, nrmse_by_scale[si], marker=".", linewidth=1.2,
+        ax.plot(x, vals_by_scale[si], marker=".", linewidth=1.2,
                 label=f"scale {si}", color=color)
     ax.set_xlabel("Block depth")
-    ax.set_ylabel("NRMSE (%)")
-    ax.set_title(f"Per-scale block NRMSE ({method_label}, {quant_mode} quant)")
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"Per-scale block {ylabel} ({method_label}, {quant_mode} quant)")
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=7, ncol=2)
     fig.tight_layout()
@@ -748,14 +752,18 @@ def main_free(args) -> None:
     print(f"running labels={label_list}, seed={SEED}, quant_v={quant_v} ({quant_mode}), mode=free")
 
     # ── accumulators per method ──
-    # heatmap: (num_stages, num_blocks) nrmse_pct sum
+    # NRMSE heatmap: (num_stages, num_blocks) nrmse_pct sum
     method_heatmap_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, num_blocks), dtype=np.float64) for m in methods}
-    # heatmap sum counts (in case of shape mismatches later, but currently 1 per label per method)
+    # Cosine distance heatmap: (num_stages, num_blocks) cosine distance sum
+    method_cos_heatmap_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, num_blocks), dtype=np.float64) for m in methods}
+    # heatmap sum counts
     method_heatmap_count: Dict[str, int] = {m: 0 for m in methods}
     # token disagreement per scale: (num_stages,) sum
     method_tok_disagree_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
     # f_hat NRMSE per scale: (num_stages,) sum
     method_fhat_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
+    # f_hat cosine distance per scale: (num_stages,) sum
+    method_fhat_cos_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
 
     for label in label_list:
         label_B = torch.tensor([label], device=device)
@@ -772,7 +780,7 @@ def main_free(args) -> None:
                 var, label_B, device=device, method=method, quant_v=quant_v,
             )
 
-            # ── per-scale block NRMSE (heatmap) ──
+            # ── per-scale block NRMSE & cosine distance (heatmaps) ──
             for si in range(num_stages):
                 for bi in range(num_blocks):
                     ref = base_outs[bi][si]
@@ -781,11 +789,18 @@ def main_free(args) -> None:
                         raise RuntimeError(
                             f"scale {si} block {bi}: shape mismatch {tuple(cur.shape)} vs {tuple(ref.shape)}"
                         )
+                    # NRMSE
                     sse = float((cur - ref).pow(2).sum().item())
                     ref_norm = float(ref.pow(2).sum().item())
                     nmse = sse / max(ref_norm, 1e-12)
                     nrmse_pct = 100.0 * math.sqrt(nmse)
                     method_heatmap_sum[method][si, bi] += nrmse_pct
+                    # cosine distance
+                    dot = float((ref * cur).sum().item())
+                    cur_norm = float(cur.pow(2).sum().item())
+                    denom = math.sqrt(max(ref_norm, 0.0) * max(cur_norm, 0.0))
+                    cos_sim = max(-1.0, min(1.0, dot / max(denom, 1e-12)))
+                    method_cos_heatmap_sum[method][si, bi] += (1.0 - cos_sim)
             method_heatmap_count[method] += 1
 
             # ── token disagreement per scale ──
@@ -797,22 +812,33 @@ def main_free(args) -> None:
                 disagree_rate = 1.0 - n_same / max(n_total, 1)
                 method_tok_disagree_sum[method][si] += disagree_rate
 
-            # ── f_hat NRMSE per scale ──
+            # ── f_hat NRMSE & cosine distance per scale ──
             for si in range(num_stages):
                 bf = base_fhat[si]
                 qf = quant_fhat[si]
                 if bf is None or qf is None:
                     fhat_nrmse = 0.0
+                    fhat_cos = 0.0
                 else:
                     sse = float((qf - bf).pow(2).sum().item())
                     ref_norm = float(bf.pow(2).sum().item())
                     fhat_nrmse = 100.0 * math.sqrt(sse / max(ref_norm, 1e-12))
+                    # cosine distance
+                    dot = float((bf * qf).sum().item())
+                    cur_norm = float(qf.pow(2).sum().item())
+                    denom = math.sqrt(max(ref_norm, 0.0) * max(cur_norm, 0.0))
+                    cos_sim = max(-1.0, min(1.0, dot / max(denom, 1e-12)))
+                    fhat_cos = 1.0 - cos_sim
                 method_fhat_sum[method][si] += fhat_nrmse
+                method_fhat_cos_sum[method][si] += fhat_cos
 
     # ── average over labels ──
     n_labels = float(len(label_list))
     method_heatmap: Dict[str, np.ndarray] = {
         m: method_heatmap_sum[m] / max(method_heatmap_count[m], 1) for m in methods
+    }
+    method_cos_heatmap: Dict[str, np.ndarray] = {
+        m: method_cos_heatmap_sum[m] / max(method_heatmap_count[m], 1) for m in methods
     }
     method_tok_disagree: Dict[str, List[float]] = {
         m: (method_tok_disagree_sum[m] / n_labels).tolist() for m in methods
@@ -820,13 +846,16 @@ def main_free(args) -> None:
     method_fhat_nrmse: Dict[str, List[float]] = {
         m: (method_fhat_sum[m] / n_labels).tolist() for m in methods
     }
+    method_fhat_cos: Dict[str, List[float]] = {
+        m: (method_fhat_cos_sum[m] / n_labels).tolist() for m in methods
+    }
 
     # ── save outputs ──
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.out_prefix}_" if args.out_prefix else ""
     mode_suffix = "KV_free" if quant_v else "Konly_free"
 
-    # Heatmaps
+    # NRMSE heatmaps
     for method in methods:
         hm_path = OUT_DIR / f"{prefix}heatmap_nrmse_{method}_{mode_suffix}.png"
         _plot_heatmap(
@@ -836,10 +865,25 @@ def main_free(args) -> None:
             out_path=hm_path,
             num_stages=num_stages,
             num_blocks=num_blocks,
+            cbar_label="NRMSE (%)",
         )
-        print(f"saved heatmap -> {hm_path}")
+        print(f"saved NRMSE heatmap -> {hm_path}")
 
-    # Per-scale line plots (one per method)
+    # Cosine distance heatmaps
+    for method in methods:
+        cos_hm_path = OUT_DIR / f"{prefix}heatmap_cos_{method}_{mode_suffix}.png"
+        _plot_heatmap(
+            method_cos_heatmap[method],
+            ylabel="Scale",
+            title=f"Free-running block cosine distance ({method}, {quant_mode})",
+            out_path=cos_hm_path,
+            num_stages=num_stages,
+            num_blocks=num_blocks,
+            cbar_label="cosine distance",
+        )
+        print(f"saved cosine heatmap -> {cos_hm_path}")
+
+    # Per-scale NRMSE line plots (one per method)
     for method in methods:
         per_scale_nrmse: Dict[int, List[float]] = {}
         for si in range(num_stages):
@@ -847,9 +891,21 @@ def main_free(args) -> None:
         line_path = OUT_DIR / f"{prefix}perscale_nrmse_{method}_{mode_suffix}.png"
         _plot_per_scale_lines(
             per_scale_nrmse, num_blocks, line_path,
-            method_label=method, quant_mode=quant_mode,
+            method_label=method, ylabel="NRMSE (%)", quant_mode=quant_mode,
         )
-        print(f"saved per-scale lines -> {line_path}")
+        print(f"saved per-scale NRMSE lines -> {line_path}")
+
+    # Per-scale cosine distance line plots (one per method)
+    for method in methods:
+        per_scale_cos: Dict[int, List[float]] = {}
+        for si in range(num_stages):
+            per_scale_cos[si] = method_cos_heatmap[method][si, :].tolist()
+        line_path = OUT_DIR / f"{prefix}perscale_cos_{method}_{mode_suffix}.png"
+        _plot_per_scale_lines(
+            per_scale_cos, num_blocks, line_path,
+            method_label=method, ylabel="cosine distance", quant_mode=quant_mode,
+        )
+        print(f"saved per-scale cosine lines -> {line_path}")
 
     # Token disagreement
     tok_path = OUT_DIR / f"{prefix}token_disagree_{mode_suffix}.png"
@@ -858,8 +914,13 @@ def main_free(args) -> None:
 
     # f_hat NRMSE
     fhat_path = OUT_DIR / f"{prefix}fhat_nrmse_{mode_suffix}.png"
-    _plot_fhat_nrmse(method_fhat_nrmse, num_stages, fhat_path, quant_mode=quant_mode)
+    _plot_fhat_metric(method_fhat_nrmse, num_stages, fhat_path, ylabel="f_hat NRMSE (%)", quant_mode=quant_mode)
     print(f"saved f_hat NRMSE -> {fhat_path}")
+
+    # f_hat cosine distance
+    fhat_cos_path = OUT_DIR / f"{prefix}fhat_cos_{mode_suffix}.png"
+    _plot_fhat_metric(method_fhat_cos, num_stages, fhat_cos_path, ylabel="f_hat cosine distance", quant_mode=quant_mode)
+    print(f"saved f_hat cosine distance -> {fhat_cos_path}")
 
     # JSON
     json_path = OUT_DIR / f"{prefix}free_running_metrics_{mode_suffix}.json"
@@ -871,12 +932,16 @@ def main_free(args) -> None:
         "num_blocks": num_blocks,
         "metric_descriptions": {
             "heatmap_nrmse": "per-scale per-block NRMSE (%), rows=scales, cols=blocks",
+            "heatmap_cosine_distance": "per-scale per-block cosine distance (1 - cos_sim), rows=scales, cols=blocks",
             "token_disagree_per_scale": "fraction of tokens that differ from baseline at each scale",
             "fhat_nrmse_per_scale": "NRMSE (%) of the accumulated f_hat latent map after each scale",
+            "fhat_cosine_distance_per_scale": "cosine distance of f_hat latent map at each scale",
         },
         "heatmap_nrmse": {m: method_heatmap[m].tolist() for m in methods},
+        "heatmap_cosine_distance": {m: method_cos_heatmap[m].tolist() for m in methods},
         "token_disagree_per_scale": method_tok_disagree,
         "fhat_nrmse_per_scale": method_fhat_nrmse,
+        "fhat_cosine_distance_per_scale": method_fhat_cos,
     }
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True, indent=2)
@@ -899,11 +964,24 @@ def main_free(args) -> None:
         vals = "  ".join(f"{method_fhat_nrmse[m][si]:>19.4f}%" for m in methods)
         print(f"  {si:>4d}  {vals}")
 
+    print(f"\nf_hat cosine distance per scale ({quant_mode}, free-running):")
+    header = f"{'scale':>6s}  " + "  ".join(f"{m:>20s}" for m in methods)
+    print(header)
+    for si in range(num_stages):
+        vals = "  ".join(f"{method_fhat_cos[m][si]:>19.6f}" for m in methods)
+        print(f"  {si:>4d}  {vals}")
+
     print(f"\nPer-scale block NRMSE summary ({quant_mode}, free-running):")
     for method in methods:
         hm = method_heatmap[method]
         print(f"  {method:20s}  mean={hm.mean():.4f}%  max={hm.max():.4f}%  "
               f"last_scale_mean={hm[-1,:].mean():.4f}%")
+
+    print(f"\nPer-scale block cosine distance summary ({quant_mode}, free-running):")
+    for method in methods:
+        chm = method_cos_heatmap[method]
+        print(f"  {method:20s}  mean={chm.mean():.6f}  max={chm.max():.6f}  "
+              f"last_scale_mean={chm[-1,:].mean():.6f}")
 
 
 if __name__ == "__main__":
