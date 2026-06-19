@@ -90,6 +90,12 @@ class PolarAngleStatsSession:
     # For V-means θ₂ codebook (same format, separate storage)
     theta2_v_kmeans_theta2: List[np.ndarray] = field(default_factory=list)
     theta2_v_kmeans_weights: List[np.ndarray] = field(default_factory=list)
+    # Per-level K-means: 5 lists, one per tree level T1–T5
+    theta2_kmeans_per_level: List[List[np.ndarray]] = field(default_factory=lambda: [[], [], [], [], []])
+    theta2_kmeans_weights_per_level: List[List[np.ndarray]] = field(default_factory=lambda: [[], [], [], [], []])
+    # Per-level V-means
+    theta2_v_kmeans_per_level: List[List[np.ndarray]] = field(default_factory=lambda: [[], [], [], [], []])
+    theta2_v_kmeans_weights_per_level: List[List[np.ndarray]] = field(default_factory=lambda: [[], [], [], [], []])
 
     def set_stage(self, si: int, pn: int) -> None:
         self.stage_si, self.stage_pn = si, pn
@@ -164,10 +170,18 @@ class PolarAngleStatsSession:
             vidx = self._rng.choice(n_vec, size=self.max_k_vectors, replace=False)
             t2_mat = t2_mat[vidx]
             mse_vec = mse_vec[vidx]
-        # Only L0 θ₂ (first 16) — deeper layers tend toward π/4, less informative
+        # L0 θ₂ only (first 16) — for backward compat single-codebook runs
         t2_l0 = t2_mat[:, :16]
         self.theta2_kmeans_theta2.append(t2_l0.reshape(-1))
         self.theta2_kmeans_weights.append(np.repeat(mse_vec, 16))
+        # Per-level θ₂ for T1–T5 codebooks
+        offsets = THETA2_LAYER_SIZES
+        col_start = 0
+        for li, sz in enumerate(offsets):
+            col_end = col_start + sz
+            self.theta2_kmeans_per_level[li].append(t2_mat[:, col_start:col_end].reshape(-1))
+            self.theta2_kmeans_weights_per_level[li].append(np.repeat(mse_vec, sz))
+            col_start = col_end
 
     def record_v(self, v_blhc: torch.Tensor, block_idx: int) -> None:
         """Like record_k but for V vectors — only collects θ₂ for K-means codebook."""
@@ -187,6 +201,14 @@ class PolarAngleStatsSession:
         t2_l0 = t2_mat[:, :16]
         self.theta2_v_kmeans_theta2.append(t2_l0.reshape(-1))
         self.theta2_v_kmeans_weights.append(np.repeat(mse_vec, 16))
+        # Per-level
+        offsets = THETA2_LAYER_SIZES
+        col_start = 0
+        for li, sz in enumerate(offsets):
+            col_end = col_start + sz
+            self.theta2_v_kmeans_per_level[li].append(t2_mat[:, col_start:col_end].reshape(-1))
+            self.theta2_v_kmeans_weights_per_level[li].append(np.repeat(mse_vec, sz))
+            col_start = col_end
 
     def aggregate_theta2_mse_for_kmeans_v(self) -> Tuple[np.ndarray, np.ndarray]:
         if not self.theta2_v_kmeans_theta2:
@@ -195,6 +217,30 @@ class PolarAngleStatsSession:
             np.concatenate(self.theta2_v_kmeans_theta2),
             np.concatenate(self.theta2_v_kmeans_weights),
         )
+
+    def aggregate_theta2_mse_for_kmeans_per_level(self) -> list[Tuple[np.ndarray, np.ndarray]]:
+        """Return list of (theta2, weights) for T1–T5, each ready for K-means fit."""
+        out = []
+        for li in range(5):
+            if not self.theta2_kmeans_per_level[li]:
+                raise ValueError(f'no K θ₂ samples for level T{li+1}')
+            out.append((
+                np.concatenate(self.theta2_kmeans_per_level[li]),
+                np.concatenate(self.theta2_kmeans_weights_per_level[li]),
+            ))
+        return out
+
+    def aggregate_theta2_mse_for_kmeans_v_per_level(self) -> list[Tuple[np.ndarray, np.ndarray]]:
+        """V version — return list of (theta2, weights) for T1–T5."""
+        out = []
+        for li in range(5):
+            if not self.theta2_v_kmeans_per_level[li]:
+                raise ValueError(f'no V θ₂ samples for level T{li+1}')
+            out.append((
+                np.concatenate(self.theta2_v_kmeans_per_level[li]),
+                np.concatenate(self.theta2_v_kmeans_weights_per_level[li]),
+            ))
+        return out
 
     def aggregate_theta2_mse_for_kmeans(self) -> Tuple[np.ndarray, np.ndarray]:
         if not self.theta2_kmeans_theta2:

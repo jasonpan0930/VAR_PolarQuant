@@ -28,6 +28,7 @@ import os
 import random
 import sys
 from pathlib import Path
+from typing import Dict, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -40,7 +41,7 @@ import torch
 from tqdm import tqdm
 
 from models import build_vae_var
-from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v
+from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v, register_per_level_codebook
 from utils.misc import create_npz_from_sample_folder
 from utils.theta2_kmeans import load_theta2_codebook
 
@@ -79,6 +80,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument('--quant-v', action=argparse.BooleanOptionalAction, default=True,
                    help='quantize V cache (default: True); --no-quant-v for K-only quant')
+    p.add_argument('--theta2-levels', type=str, default=None,
+                   help='per-level codebook assignment for int6_kmeans_int4, e.g. "1,1,1,4,4" '
+                        '(loads CBs from polar_quant_dumps/theta2_kmeans_d{DEPTH}_T{N}/codebook.json)')
     return p.parse_args()
 
 
@@ -93,12 +97,50 @@ def save_recon_png(recon: torch.Tensor, path: Path) -> None:
     PImage.fromarray(img).save(path)
 
 
-def setup_polar(var, polar_quant: str, kmeans_codebook: Path, quant_v: bool = True) -> str:
+def setup_polar(var, polar_quant: str, kmeans_codebook: Path, quant_v: bool = True,
+                 theta2_levels: Optional[str] = None, model_depth: int = 30) -> str:
     name = polar_quant.lower().strip()
     if name in ('none', 'baseline', 'fp16', 'off'):
         var.set_polar_quant(None)
         return 'baseline_fp16_k'
     if name == 'int6_kmeans_int4':
+        if theta2_levels is not None:
+            # ── per-level codebook assignment ──
+            level_ids = [int(x.strip()) for x in theta2_levels.split(',')]
+            if len(level_ids) != 5:
+                raise ValueError(f'--theta2-levels must have 5 comma-separated IDs, got {len(level_ids)}')
+            # Load unique codebooks
+            cb_cache: Dict[int, list] = {}
+            for n in set(level_ids):
+                cb_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{model_depth}_T{n}' / 'codebook.json'
+                if not cb_path.is_file():
+                    raise FileNotFoundError(f'per-level codebook missing: {cb_path}')
+                centers, _ = load_theta2_codebook(cb_path)
+                cb_cache[n] = list(float(c) for c in centers)
+                print(f'  [setup_polar] loaded CB{n} ({len(cb_cache[n])}-entry) from {cb_path}')
+            centers_per_level = [cb_cache[n] for n in level_ids]
+            config_name = f'int6_kmeans_int4_L{"".join(str(n) for n in level_ids)}'
+            label = f'INT6 θ₁ + per-level K-means θ₂ ({theta2_levels})'
+            register_per_level_codebook(centers_per_level, config_name=config_name, label=label)
+            # V per-level (if quant_v and codebooks exist)
+            if quant_v:
+                v_cb_cache: Dict[int, list] = {}
+                for n in set(level_ids):
+                    v_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{model_depth}_v_T{n}' / 'codebook.json'
+                    if v_path.is_file():
+                        v_centers, _ = load_theta2_codebook(v_path)
+                        v_cb_cache[n] = list(float(c) for c in v_centers)
+                        print(f'  [setup_polar] loaded V-CB{n} from {v_path}')
+                if len(v_cb_cache) == len(set(level_ids)):
+                    v_centers_per_level = [v_cb_cache[n] for n in level_ids]
+                    v_config_name = f'{config_name}_v'
+                    v_label = f'INT6 θ₁ + per-level K-means θ₂ (V, {theta2_levels})'
+                    register_per_level_codebook(v_centers_per_level, config_name=v_config_name, label=v_label)
+                    # set_polar_quant(name) below will be overridden — use K config name for K, V config for V
+            name = config_name
+            var.set_polar_quant(name, quant_v=quant_v)
+            return f'{config_name}'
+        # ── legacy single-codebook path ──
         if not kmeans_codebook.is_file():
             raise FileNotFoundError(
                 f'K-means codebook missing: {kmeans_codebook}\n'
@@ -108,7 +150,7 @@ def setup_polar(var, polar_quant: str, kmeans_codebook: Path, quant_v: bool = Tr
         register_theta2_kmeans_codebook(centers)
         # Try loading V-specific codebook if exists
         v_cb_path = kmeans_codebook.parent.parent / f'{kmeans_codebook.parent.name}_v' / 'codebook.json'
-        if v_cb_path.is_file():
+        if v_cb_path.is_file() and quant_v:
             v_centers, _ = load_theta2_codebook(v_cb_path)
             register_theta2_kmeans_codebook_v(v_centers)
             print(f'  [setup_polar] loaded V codebook from {v_cb_path}')
@@ -170,7 +212,8 @@ def generate(args: argparse.Namespace) -> None:
     if device != 'cuda':
         print('WARNING: CUDA not available; FID sampling will be extremely slow on CPU.')
     _, var = build_models(args.model_depth, device)
-    run_tag = setup_polar(var, args.polar_quant, args.kmeans_codebook, quant_v=args.quant_v)
+    run_tag = setup_polar(var, args.polar_quant, args.kmeans_codebook, quant_v=args.quant_v,
+                           theta2_levels=args.theta2_levels, model_depth=args.model_depth)
     print(f'polar mode: {run_tag} on {device}')
 
     torch.backends.cudnn.benchmark = True

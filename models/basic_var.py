@@ -105,38 +105,41 @@ class SelfAttention(nn.Module):
         self.cached_k = self.cached_v = None
         self.quant_v = quant_v and enable
         self.cached_k_polar = PolarKVCache(config=polar_config) if polar_config is not None else None
-        if self.quant_v:
-            # V may use a separate codebook (int6_kmeans_int4_v); fallback to K config
+        if self.quant_v and polar_config is not None:
+            # V may use a separate codebook ({config_name}_v); fallback to K config
+            v_key = f'{polar_config.name}_v'
             v_config = polar_config
-            if polar_config is not None and polar_config.name == 'int6_kmeans_int4' and 'int6_kmeans_int4_v' in POLAR_QUANT_CONFIGS:
-                v_config = POLAR_QUANT_CONFIGS['int6_kmeans_int4_v']
+            if v_key in POLAR_QUANT_CONFIGS:
+                v_config = POLAR_QUANT_CONFIGS[v_key]
             self.cached_v_polar = PolarKVCache(config=v_config)
         else:
             self.cached_v_polar = None
     
     def _update_kv_cache(self, k, v, dim_cat, main_type):
         """Update cache; return full (K, V) tensors (history + new) for attention."""
+        # Pre-cache K/V in BLHC for angle stats (before any quantization)
+        k_blhc = k if dim_cat == 1 else k.permute(0, 2, 1, 3)
+        v_blhc = v if dim_cat == 1 else v.permute(0, 2, 1, 3)
+        if self.angle_stats is not None:
+            self.angle_stats.record_k(k_blhc, block_idx=self.block_idx)
+            self.angle_stats.record_v(v_blhc, block_idx=self.block_idx)
+
         if self.polar_config is not None:
             # Polar quantization: encode new K, decode full cache for attention
-            k_blhc = k if dim_cat == 1 else k.permute(0, 2, 1, 3)
             polar_new = PolarK64Batch.from_k(k_blhc, config=self.polar_config)
             self.cached_k_polar.append(polar_new)
             k_decoded = self.cached_k_polar.decode_k(dtype=main_type)
             k = k_decoded if dim_cat == 1 else k_decoded.permute(0, 2, 1, 3)
-            if self.angle_stats is not None:
-                self.angle_stats.record_k(k_blhc, block_idx=self.block_idx)
             # V: polar quantization (may use V-specific codebook) – only when quant_v is enabled
             if self.quant_v:
-                v_blhc = v if dim_cat == 1 else v.permute(0, 2, 1, 3)
                 v_config = self.polar_config
-                if self.polar_config.name == 'int6_kmeans_int4' and 'int6_kmeans_int4_v' in POLAR_QUANT_CONFIGS:
-                    v_config = POLAR_QUANT_CONFIGS['int6_kmeans_int4_v']
+                v_key = f'{self.polar_config.name}_v'
+                if v_key in POLAR_QUANT_CONFIGS:
+                    v_config = POLAR_QUANT_CONFIGS[v_key]
                 polar_v = PolarK64Batch.from_k(v_blhc, config=v_config)
                 self.cached_v_polar.append(polar_v)
                 v_decoded = self.cached_v_polar.decode_k(dtype=main_type)
                 v = v_decoded if dim_cat == 1 else v_decoded.permute(0, 2, 1, 3)
-                if self.angle_stats is not None:
-                    self.angle_stats.record_v(v_blhc, block_idx=self.block_idx)
             else:
                 # V: standard FP16 cache (K-only quant mode)
                 if self.cached_v is None:

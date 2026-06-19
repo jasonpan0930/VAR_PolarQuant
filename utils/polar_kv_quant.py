@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 
-from utils.angle_quant import DEFAULT_CONFIG, PolarQuantConfig
+from utils.angle_quant import DEFAULT_CONFIG, PolarQuantConfig, NUM_TREE_LEVELS
 
 HEAD_DIM = 64
 NUM_Q1 = 32
@@ -52,11 +52,11 @@ def encode_polar_k64(
     # Stage 2: merge tree (5 layers: 32->16->8->4->2->1)
     nodes = y
     q2_parts = []
-    for _ in range(5):
+    for li in range(NUM_TREE_LEVELS):
         a, b = nodes[..., 0::2], nodes[..., 1::2]
         nodes = torch.sqrt(a * a + b * b + 1e-12)
         theta2 = torch.atan2(b, a)
-        q2_parts.append(config.theta2.quantize(theta2))
+        q2_parts.append(config.theta2_per_level[li].quantize(theta2))
 
     q2 = torch.cat(q2_parts, dim=-1)          # (..., 31)
     z = nodes[..., 0]                          # (...) root magnitude
@@ -73,13 +73,15 @@ def decode_polar_k64(
 ) -> torch.Tensor:
     """Decode (q1: int64x32, q2: int64x31, z: float32) -> K_hat (..., 64)."""
     # Reverse merge tree: z -> 32 lengths y
-    theta2_all = config.theta2.dequantize(q2)
+    # q2 layout: [T1(16), T2(8), T3(4), T4(2), T5(1)], decoded right-to-left
     nodes = z.unsqueeze(-1)
     offset = NUM_Q2
-    for layer in range(5):
+    for layer in range(NUM_TREE_LEVELS):
         n = 2 ** layer
         offset -= n
-        theta = theta2_all[..., offset:offset + n]
+        q2_slice = q2[..., offset:offset + n].to(torch.int64)
+        # decode order is T5→T1 (reverse of encode T1→T5)
+        theta = config.theta2_per_level[NUM_TREE_LEVELS - 1 - layer].dequantize(q2_slice)
         a = nodes * torch.cos(theta)
         b = nodes * torch.sin(theta)
         nodes = torch.stack([a, b], dim=-1).reshape(*nodes.shape[:-1], n * 2)
@@ -101,13 +103,14 @@ def decode_y_from_polar_tree(
     config: PolarQuantConfig = DEFAULT_CONFIG,
 ) -> torch.Tensor:
     """Decode merge tree -> 32 lengths y (..., 32)."""
-    theta2_all = config.theta2.dequantize(q2)
     nodes = z_root.unsqueeze(-1)
     offset = NUM_Q2
-    for layer in range(5):
+    for layer in range(NUM_TREE_LEVELS):
         n = 2 ** layer
         offset -= n
-        theta = theta2_all[..., offset:offset + n]
+        q2_slice = q2[..., offset:offset + n].to(torch.int64)
+        # decode order is T5→T1 (reverse of encode T1→T5)
+        theta = config.theta2_per_level[NUM_TREE_LEVELS - 1 - layer].dequantize(q2_slice)
         a = nodes * torch.cos(theta)
         b = nodes * torch.sin(theta)
         nodes = torch.stack([a, b], dim=-1).reshape(*nodes.shape[:-1], n * 2)
@@ -134,11 +137,11 @@ def _encode_core(k: torch.Tensor, config: PolarQuantConfig):
 
     nodes = y
     q2_parts, theta2_parts = [], []
-    for _ in range(5):
+    for li in range(NUM_TREE_LEVELS):
         a, b = nodes[..., 0::2], nodes[..., 1::2]
         nodes = torch.sqrt(a * a + b * b + 1e-12)
         theta2 = torch.atan2(b, a)
-        q2_parts.append(config.theta2.quantize(theta2))
+        q2_parts.append(config.theta2_per_level[li].quantize(theta2))
         theta2_parts.append(theta2)
 
     q2 = torch.cat(q2_parts, dim=-1)

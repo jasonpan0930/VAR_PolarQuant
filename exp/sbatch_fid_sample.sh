@@ -81,7 +81,13 @@ else
   QUANT_V_ARGS=(--no-quant-v)
 fi
 
-echo "shard=${SLURM_ARRAY_TASK_ID} polar=${POLAR_QUANT} depth=${DEPTH} classes=[${CLASS_START},${CLASS_END}] skip=${SKIP} quant_v=${QUANT_V} -> ${OUT_DIR}"
+THETA2_LEVELS="${THETA2_LEVELS:-}"
+THETA2_LEVELS_ARGS=()
+if [[ -n "${THETA2_LEVELS}" ]]; then
+  THETA2_LEVELS_ARGS=(--theta2-levels "${THETA2_LEVELS}")
+fi
+
+echo "shard=${SLURM_ARRAY_TASK_ID} polar=${POLAR_QUANT} depth=${DEPTH} classes=[${CLASS_START},${CLASS_END}] skip=${SKIP} quant_v=${QUANT_V} theta2_levels=${THETA2_LEVELS} -> ${OUT_DIR}"
 
 "${PYTHON}" "${ROOT}/exp/exp_fid_sample.py" \
   --model-depth "${DEPTH}" \
@@ -91,4 +97,5 @@ echo "shard=${SLURM_ARRAY_TASK_ID} polar=${POLAR_QUANT} depth=${DEPTH} classes=[
   --class-end "${CLASS_END}" \
   "${KMEANS_ARGS[@]}" \
   "${QUANT_V_ARGS[@]}" \
+  "${THETA2_LEVELS_ARGS[@]}" \
   "${SKIP_ARGS[@]}"

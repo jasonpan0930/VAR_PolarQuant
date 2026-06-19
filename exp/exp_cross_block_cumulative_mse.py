@@ -50,7 +50,7 @@ import torch
 
 import models.var as var_mod
 from models import build_vae_var
-from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v
+from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v, register_per_level_codebook
 from utils.theta2_kmeans import load_theta2_codebook
 
 OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse"
@@ -294,6 +294,13 @@ def parse_args() -> argparse.Namespace:
         "--quant-v", action=argparse.BooleanOptionalAction, default=True,
         help="Quantize V cache (default: True); --no-quant-v for K-only comparison",
     )
+    p.add_argument(
+        "--per-level-kmeans", type=str, nargs="+", default=[],
+        metavar=("NAME", "LEVELS"),
+        help="Add per-level kmeans configs. Format: NAME LEVEL_ASSIGNMENT pairs.\n"
+             "Example: --per-level-kmeans my_11144 1,1,1,4,4 my_12345 1,2,3,4,5\n"
+             "Loads codebooks from polar_quant_dumps/theta2_kmeans_d30_T{N}/codebook.json",
+    )
     return p.parse_args()
 
 
@@ -329,6 +336,52 @@ def main() -> None:
 
     maybe_register_kmeans_codebook()
 
+    quant_v = args.quant_v
+
+    # ── per-level kmeans: register extra configs & add to METHODS ──
+    methods_list = list(METHODS)
+    pl = args.per_level_kmeans
+    if len(pl) % 2 != 0:
+        raise ValueError("--per-level-kmeans requires even number of args (pairs of NAME LEVELS)")
+    for i in range(0, len(pl), 2):
+        config_name = pl[i]
+        level_str = pl[i + 1]
+        level_ids = [int(x.strip()) for x in level_str.split(',')]
+        if len(level_ids) != 5:
+            raise ValueError(f"--per-level-kmeans {config_name}: LEVELS must have 5 entries, got {len(level_ids)}")
+        cb_cache: Dict[int, list] = {}
+        for n in set(level_ids):
+            cb_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{MODEL_DEPTH}_T{n}' / 'codebook.json'
+            if not cb_path.is_file():
+                raise FileNotFoundError(f'per-level codebook missing: {cb_path}')
+            centers, _ = load_theta2_codebook(cb_path)
+            cb_cache[n] = list(float(c) for c in centers)
+            print(f'  [per-level] loaded CB{n} ({len(cb_cache[n])}-entry) from {cb_path}')
+        centers_per_level = [cb_cache[n] for n in level_ids]
+        label = f'INT6 θ₁ + per-level K-means θ₂ ({level_str})'
+        register_per_level_codebook(centers_per_level, config_name=config_name, label=label)
+        methods_list.append(config_name)
+        # V per-level (if quant_v and codebooks exist)
+        if quant_v:
+            v_cb_cache: Dict[int, list] = {}
+            all_v_found = True
+            for n in set(level_ids):
+                v_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{MODEL_DEPTH}_v_T{n}' / 'codebook.json'
+                if v_path.is_file():
+                    v_centers, _ = load_theta2_codebook(v_path)
+                    v_cb_cache[n] = list(float(c) for c in v_centers)
+                else:
+                    all_v_found = False
+            if all_v_found:
+                v_centers_per_level = [v_cb_cache[n] for n in level_ids]
+                v_label = f'INT6 θ₁ + per-level K-means θ₂ (V, {level_str})'
+                register_per_level_codebook(v_centers_per_level, config_name=f'{config_name}_v', label=v_label)
+                print(f'  [per-level] registered V config: {config_name}_v')
+            else:
+                print(f'  [per-level] warning: V codebooks incomplete for {config_name}, V will fall back to K codebook')
+        print(f'  [per-level] registered config: {config_name} ({level_str})')
+    methods = tuple(methods_list)
+
     setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
     setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
 
@@ -359,25 +412,24 @@ def main() -> None:
     label_list = [int(x) for x in args.class_labels]
     if not label_list:
         raise ValueError("no class labels provided")
-    quant_v = args.quant_v
     quant_mode = "KV" if quant_v else "K-only"
     print(f"running labels={label_list}, seed={SEED}, cumulative={args.cumulative}, quant_v={quant_v} ({quant_mode})")
 
-    method_to_block_nmse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in METHODS}
-    method_to_block_nrmse_pct_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in METHODS}
-    method_to_block_abs_mse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in METHODS}
-    method_to_block_cos_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in METHODS}
-    method_to_nrmse_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in METHODS}
-    method_to_abs_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in METHODS}
-    method_to_cos_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in METHODS}
-    method_to_cum_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in METHODS}
+    method_to_block_nmse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
+    method_to_block_nrmse_pct_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
+    method_to_block_abs_mse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
+    method_to_block_cos_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
+    method_to_nrmse_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
+    method_to_abs_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
+    method_to_cos_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
+    method_to_cum_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
 
     for label in label_list:
         label_B = torch.tensor([label], device=device)
         print(f"[label={label}] collecting baseline block outputs and sampled token path...")
         baseline_outputs, baseline_stage_indices = collect_baseline_block_outputs_and_indices(var, label_B, device=device)
 
-        for method in METHODS:
+        for method in methods:
             if method not in POLAR_QUANT_CONFIGS and method != "int6_kmeans_int4":
                 raise ValueError(f"unknown method: {method}")
             print(f"[label={label}] computing method={method}...")
@@ -403,25 +455,25 @@ def main() -> None:
 
     n_labels = float(len(label_list))
     method_to_block_nmse: Dict[str, List[float]] = {
-        m: (method_to_block_nmse_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_block_nmse_sum[m] / n_labels).tolist() for m in methods
     }
     method_to_block_nrmse_percent: Dict[str, List[float]] = {
-        m: (method_to_block_nrmse_pct_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_block_nrmse_pct_sum[m] / n_labels).tolist() for m in methods
     }
     method_to_nrmse_percent_at_depth: Dict[str, List[float]] = {
-        m: (method_to_nrmse_at_depth_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_nrmse_at_depth_sum[m] / n_labels).tolist() for m in methods
     }
     method_to_block_abs_mse: Dict[str, List[float]] = {
-        m: (method_to_block_abs_mse_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_block_abs_mse_sum[m] / n_labels).tolist() for m in methods
     }
     method_to_abs_mse_at_depth: Dict[str, List[float]] = {
-        m: (method_to_abs_at_depth_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_abs_at_depth_sum[m] / n_labels).tolist() for m in methods
     }
     method_to_block_cosine_distance: Dict[str, List[float]] = {
-        m: (method_to_block_cos_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_block_cos_sum[m] / n_labels).tolist() for m in methods
     }
     method_to_cosine_distance_at_depth: Dict[str, List[float]] = {
-        m: (method_to_cos_at_depth_sum[m] / n_labels).tolist() for m in METHODS
+        m: (method_to_cos_at_depth_sum[m] / n_labels).tolist() for m in methods
     }
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -488,7 +540,7 @@ def main() -> None:
 
     if args.cumulative:
         method_to_cum_at_depth: Dict[str, List[float]] = {
-            m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in METHODS
+            m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in methods
         }
         method_to_cum_at_depth_pct = {m: [v * 100.0 for v in vals] for m, vals in method_to_cum_at_depth.items()}
         cum_fig = OUT_DIR / f"{prefix}cumulative_nmse_{mode_suffix}_every4.png"
@@ -521,7 +573,7 @@ def main() -> None:
     print(f"saved data -> {json_path}")
     final_depth = sample_depths[-1]
     print(f"at depth={final_depth} ({quant_mode}, avg over labels):")
-    for method in METHODS:
+    for method in methods:
         nrmse_pct = method_to_nrmse_percent_at_depth[method][-1]
         abs_m = method_to_abs_mse_at_depth[method][-1]
         cos_d = method_to_cosine_distance_at_depth[method][-1]

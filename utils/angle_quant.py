@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -137,12 +137,31 @@ THETA2_KMEANS_INT4_V: Optional[AngleQuantScheme] = None
 #  PolarQuantConfig — θ₁ + θ₂ 配對（一個完整的 polar K 量化方案）
 # ═══════════════════════════════════════════════════════════════════
 
+NUM_TREE_LEVELS = 5
+
 @dataclass(frozen=True)
 class PolarQuantConfig:
     name: str
     label: str
     theta1: AngleQuantScheme
-    theta2: AngleQuantScheme
+    _theta2: Union[AngleQuantScheme, Tuple[AngleQuantScheme, ...]]
+
+    def __post_init__(self):
+        """Normalize theta2 to 5-tuple (one per tree level T1…T5)."""
+        if isinstance(self._theta2, AngleQuantScheme):
+            object.__setattr__(self, '_theta2', tuple(self._theta2 for _ in range(NUM_TREE_LEVELS)))
+        elif len(self._theta2) != NUM_TREE_LEVELS:
+            raise ValueError(f'theta2 must have {NUM_TREE_LEVELS} schemes, got {len(self._theta2)}')
+
+    @property
+    def theta2_per_level(self) -> Tuple[AngleQuantScheme, ...]:
+        """θ₂ schemes for tree levels T1–T5."""
+        return self._theta2  # type: ignore[return-value]
+
+    @property
+    def theta2(self) -> AngleQuantScheme:
+        """Backward compat: returns T1 scheme (common when all levels share same codebook)."""
+        return self._theta2[0]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -223,6 +242,35 @@ def register_theta2_kmeans_codebook_v(
         config_name, label, THETA1_INT6_UNIFORM, scheme,
     )
     return scheme
+
+
+def register_per_level_codebook(
+    centers_per_level: Sequence[Sequence[float]],
+    config_name: str,
+    label: str = 'INT6 θ₁ + per-level K-means θ₂',
+) -> PolarQuantConfig:
+    """Register a per-level θ₂ codebook config (T1–T5 each with its own centers).
+    
+    Args:
+        centers_per_level: 5 lists of centers, one per tree level T1–T5.
+                           T1–T3 typically 16-entry (4-bit); T4–T5 typically 4-entry (2-bit).
+        config_name: name to register in POLAR_QUANT_CONFIGS.
+        label: human-readable label.
+    
+    Returns the new PolarQuantConfig.
+    """
+    if len(centers_per_level) != NUM_TREE_LEVELS:
+        raise ValueError(f'centers_per_level must have {NUM_TREE_LEVELS} entries, got {len(centers_per_level)}')
+    schemes = []
+    for li, centers in enumerate(centers_per_level):
+        n = len(centers)
+        schemes.append(AngleQuantScheme(
+            name=f'kmeans_per_t{li+1}', label=f'K-means θ₂ T{li+1} ({n}-entry)',
+            codebook=tuple(float(c) for c in sorted(centers)),
+        ))
+    config = PolarQuantConfig(config_name, label, THETA1_INT6_UNIFORM, tuple(schemes))
+    POLAR_QUANT_CONFIGS[config_name] = config
+    return config
 
 
 # ═══════════════════════════════════════════════════════════════════
