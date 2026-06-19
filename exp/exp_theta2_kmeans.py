@@ -36,6 +36,7 @@ from utils.angle_quant import (
     POLAR_QUANT_CONFIGS,
     THETA2_UNIFORM_INT4,
     register_theta2_kmeans_codebook,
+    register_theta2_kmeans_codebook_v,
 )
 from utils.polar_angle_viz import PolarAngleStatsSession, render_all_plots
 from utils.theta2_kmeans import kmeans_theta2_codebook, load_theta2_codebook, save_theta2_codebook
@@ -75,6 +76,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--cfg', type=float, default=4.0, help='CFG during θ₂ collection')
     p.add_argument('--seed-base', type=int, default=SEED, help='g_seed = seed_base + class_idx')
     p.add_argument('--skip-k-error-plot', action='store_true')
+    p.add_argument(
+        '--collect-v', action='store_true',
+        help='collect V θ₂ instead of K (for separate V codebook)',
+    )
     return p.parse_args()
 
 
@@ -83,6 +88,10 @@ def default_codebook_path(depth: int) -> Path:
     if depth == 16 and legacy.is_file():
         return legacy
     return ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{depth}' / 'codebook.json'
+
+
+def default_v_codebook_path(depth: int) -> Path:
+    return ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{depth}_v' / 'codebook.json'
 
 
 def default_target_blocks(depth: int) -> tuple[int, ...]:
@@ -124,18 +133,23 @@ def collect_multi_class_theta2(
     target_blocks: tuple[int, ...],
     cfg: float,
     seed_base: int,
+    collect_v: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     theta2_parts: list[np.ndarray] = []
     weight_parts: list[np.ndarray] = []
     per_class: list[dict] = []
 
-    print(f'collecting FP θ₂ under {COLLECT_CONFIG} blocks={target_blocks} cfg={cfg}')
+    target = 'V' if collect_v else 'K'
+    print(f'collecting FP θ₂ for {target} under {COLLECT_CONFIG} blocks={target_blocks} cfg={cfg}')
     for class_idx in class_labels:
         g_seed = seed_base + class_idx
         label_B = torch.tensor([class_idx], device=device)
         print(f'  class {class_idx} g_seed={g_seed} ...', flush=True)
         session = collect_theta2_mse(var, label_B, target_blocks, cfg, g_seed)
-        theta2, weights = session.aggregate_theta2_mse_for_kmeans()
+        if collect_v:
+            theta2, weights = session.aggregate_theta2_mse_for_kmeans_v()
+        else:
+            theta2, weights = session.aggregate_theta2_mse_for_kmeans()
         theta2_parts.append(theta2)
         weight_parts.append(weights)
         per_class.append({
@@ -206,12 +220,14 @@ def main() -> None:
     depth = args.model_depth
     target_blocks = tuple(args.target_blocks) if args.target_blocks else default_target_blocks(depth)
     class_labels = tuple(args.class_labels)
-    codebook_path = args.codebook_out or default_codebook_path(depth)
+    codebook_path = args.codebook_out or (default_v_codebook_path(depth) if args.collect_v else default_codebook_path(depth))
     out_kmeans = codebook_path.parent
+    config_name = 'int6_kmeans_int4_v' if args.collect_v else 'int6_kmeans_int4'
+    target_label = 'V' if args.collect_v else 'K'
 
     print(f'device: {device}')
     print(f'model_depth={depth} target_blocks={target_blocks} class_labels={class_labels}')
-    print(f'codebook_path={codebook_path}')
+    print(f'target={target_label} config={config_name} codebook_path={codebook_path}')
 
     vae_ckpt = ROOT / 'vae_ch160v4096z32.pth'
     var_ckpt = ROOT / f'var_d{depth}.pth'
@@ -233,6 +249,7 @@ def main() -> None:
     else:
         theta2, weights, per_class = collect_multi_class_theta2(
             var, class_labels, target_blocks, args.cfg, args.seed_base,
+            collect_v=args.collect_v,
         )
         print(f'total θ₂ samples: {theta2.size:,}, weight sum={weights.sum():.6f}')
         centers, meta = kmeans_theta2_codebook(theta2, weights, seed=KMEANS_SEED)
@@ -244,31 +261,36 @@ def main() -> None:
             'cfg': args.cfg,
             'seed_base': args.seed_base,
             'collect_config': COLLECT_CONFIG,
+            'collect_target': 'V' if args.collect_v else 'K',
+            'l0_only': True,
         })
         save_theta2_codebook(codebook_path, centers, meta)
         print(f'saved codebook -> {codebook_path}')
         print(f'  backend={meta.get("backend")} weighted_angle_mse={meta.get("weighted_mse_angle"):.6e}')
         print(f'  uniform_angle_mse={meta.get("uniform_mse_angle"):.6e}')
 
-    scheme = register_theta2_kmeans_codebook(centers)
-    print('K-means θ₂ centroids (rad):')
+    if args.collect_v:
+        scheme = register_theta2_kmeans_codebook_v(centers, config_name=config_name)
+    else:
+        scheme = register_theta2_kmeans_codebook(centers, config_name=config_name)
+    print(f'{target_label} θ₂ centroids (rad):')
     for i, c in enumerate(scheme.codebook):
         print(f'  [{i:2d}] {c:.8f}')
 
     n_cls, n_blk = len(class_labels), len(target_blocks)
     plot_codebooks(
         centers, out_kmeans / 'codebook_vs_uniform.png', depth,
-        subtitle=f'{n_cls} classes × {n_blk} blocks',
+        subtitle=f'{target_label}-K-means: {n_cls} classes × {n_blk} blocks (L0 only)',
     )
     print(f'codebook plot -> {out_kmeans / "codebook_vs_uniform.png"}')
 
-    if not args.skip_k_error_plot:
+    if not args.skip_k_error_plot and not args.collect_v:
         eval_class = class_labels[0]
-        out_dir = ROOT / 'polar_quant_dumps' / 'angle_plots' / f'd{depth}' / 'int6_kmeans_int4'
+        out_dir = ROOT / 'polar_quant_dumps' / 'angle_plots' / f'd{depth}' / config_name
         run_k_error_plot(
             var,
             torch.tensor([eval_class], device=device),
-            'int6_kmeans_int4',
+            config_name,
             out_dir,
             target_blocks,
             args.cfg,

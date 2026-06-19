@@ -40,7 +40,7 @@ import torch
 from tqdm import tqdm
 
 from models import build_vae_var
-from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook
+from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v
 from utils.misc import create_npz_from_sample_folder
 from utils.theta2_kmeans import load_theta2_codebook
 
@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
         '--pack-npz-only', action='store_true',
         help='only pack existing PNG folder to .npz (needs 50_000 files)',
     )
+    p.add_argument('--quant-v', action=argparse.BooleanOptionalAction, default=True,
+                   help='quantize V cache (default: True); --no-quant-v for K-only quant')
     return p.parse_args()
 
 
@@ -91,7 +93,7 @@ def save_recon_png(recon: torch.Tensor, path: Path) -> None:
     PImage.fromarray(img).save(path)
 
 
-def setup_polar(var, polar_quant: str, kmeans_codebook: Path) -> str:
+def setup_polar(var, polar_quant: str, kmeans_codebook: Path, quant_v: bool = True) -> str:
     name = polar_quant.lower().strip()
     if name in ('none', 'baseline', 'fp16', 'off'):
         var.set_polar_quant(None)
@@ -104,10 +106,16 @@ def setup_polar(var, polar_quant: str, kmeans_codebook: Path) -> str:
             )
         centers, _ = load_theta2_codebook(kmeans_codebook)
         register_theta2_kmeans_codebook(centers)
+        # Try loading V-specific codebook if exists
+        v_cb_path = kmeans_codebook.parent.parent / f'{kmeans_codebook.parent.name}_v' / 'codebook.json'
+        if v_cb_path.is_file():
+            v_centers, _ = load_theta2_codebook(v_cb_path)
+            register_theta2_kmeans_codebook_v(v_centers)
+            print(f'  [setup_polar] loaded V codebook from {v_cb_path}')
     elif name not in POLAR_QUANT_CONFIGS:
         opts = ', '.join(['none'] + sorted(POLAR_QUANT_CONFIGS) + ['int6_kmeans_int4'])
         raise ValueError(f'unknown --polar-quant {polar_quant!r}; choose: {opts}')
-    var.set_polar_quant(name)
+    var.set_polar_quant(name, quant_v=quant_v)
     return name
 
 
@@ -162,7 +170,7 @@ def generate(args: argparse.Namespace) -> None:
     if device != 'cuda':
         print('WARNING: CUDA not available; FID sampling will be extremely slow on CPU.')
     _, var = build_models(args.model_depth, device)
-    run_tag = setup_polar(var, args.polar_quant, args.kmeans_codebook)
+    run_tag = setup_polar(var, args.polar_quant, args.kmeans_codebook, quant_v=args.quant_v)
     print(f'polar mode: {run_tag} on {device}')
 
     torch.backends.cudnn.benchmark = True

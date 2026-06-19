@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.helpers import DropPath, drop_path
-from utils.angle_quant import PolarQuantConfig
+from utils.angle_quant import POLAR_QUANT_CONFIGS, PolarQuantConfig
 from utils.polar_kv_quant import PolarK64Batch, PolarKVCache
 
 
@@ -90,16 +90,29 @@ class SelfAttention(nn.Module):
         self.polar_config: Optional[PolarQuantConfig] = None   # None = standard FP16 cache
         self.cached_k = self.cached_v = None
         self.cached_k_polar: Optional[PolarKVCache] = None
+        self.cached_v_polar: Optional[PolarKVCache] = None
         
         # --- Optional: angle statistics collector (set externally by experiment scripts) ---
         self.angle_stats = None
     
-    def kv_caching(self, enable: bool, polar_config: Optional[PolarQuantConfig] = None):
-        """Enable/disable KV caching. Pass polar_config to enable polar K quantization."""
+    def kv_caching(self, enable: bool, polar_config: Optional[PolarQuantConfig] = None, quant_v: bool = True):
+        """Enable/disable KV caching. Pass polar_config to enable polar K-V quantization.
+        
+        quant_v=False → only K is polar-quantized; V stays standard FP16 cache.
+        """
         self.caching = enable
         self.polar_config = polar_config if enable else None
         self.cached_k = self.cached_v = None
+        self.quant_v = quant_v and enable
         self.cached_k_polar = PolarKVCache(config=polar_config) if polar_config is not None else None
+        if self.quant_v:
+            # V may use a separate codebook (int6_kmeans_int4_v); fallback to K config
+            v_config = polar_config
+            if polar_config is not None and polar_config.name == 'int6_kmeans_int4' and 'int6_kmeans_int4_v' in POLAR_QUANT_CONFIGS:
+                v_config = POLAR_QUANT_CONFIGS['int6_kmeans_int4_v']
+            self.cached_v_polar = PolarKVCache(config=v_config)
+        else:
+            self.cached_v_polar = None
     
     def _update_kv_cache(self, k, v, dim_cat, main_type):
         """Update cache; return full (K, V) tensors (history + new) for attention."""
@@ -112,11 +125,24 @@ class SelfAttention(nn.Module):
             k = k_decoded if dim_cat == 1 else k_decoded.permute(0, 2, 1, 3)
             if self.angle_stats is not None:
                 self.angle_stats.record_k(k_blhc, block_idx=self.block_idx)
-            # V stays FP16 (not quantized)
-            if self.cached_v is None:
-                self.cached_v = v
+            # V: polar quantization (may use V-specific codebook) – only when quant_v is enabled
+            if self.quant_v:
+                v_blhc = v if dim_cat == 1 else v.permute(0, 2, 1, 3)
+                v_config = self.polar_config
+                if self.polar_config.name == 'int6_kmeans_int4' and 'int6_kmeans_int4_v' in POLAR_QUANT_CONFIGS:
+                    v_config = POLAR_QUANT_CONFIGS['int6_kmeans_int4_v']
+                polar_v = PolarK64Batch.from_k(v_blhc, config=v_config)
+                self.cached_v_polar.append(polar_v)
+                v_decoded = self.cached_v_polar.decode_k(dtype=main_type)
+                v = v_decoded if dim_cat == 1 else v_decoded.permute(0, 2, 1, 3)
+                if self.angle_stats is not None:
+                    self.angle_stats.record_v(v_blhc, block_idx=self.block_idx)
             else:
-                v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+                # V: standard FP16 cache (K-only quant mode)
+                if self.cached_v is None:
+                    self.cached_v = v
+                else:
+                    v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
         else:
             # Standard FP16 cache (original VAR behavior)
             if self.cached_k is None:

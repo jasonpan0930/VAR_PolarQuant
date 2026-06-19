@@ -38,6 +38,7 @@ class VAR(nn.Module):
         self.prog_si = -1   # progressive training
         self.polar_config: Optional[PolarQuantConfig] = None  # set via set_polar_quant()
         self._angle_stats = None  # optional: PolarAngleStatsSession for experiments
+        self.quant_v: bool = True  # K+V quant when True; K-only quant when False
         
         self.patch_nums: Tuple[int] = patch_nums
         self.L = sum(pn ** 2 for pn in self.patch_nums)
@@ -162,7 +163,7 @@ class VAR(nn.Module):
         f_hat = sos.new_zeros(B, self.Cvae, self.patch_nums[-1], self.patch_nums[-1])
         
         for b in self.blocks:
-            b.attn.kv_caching(True, polar_config=self.polar_config)
+            b.attn.kv_caching(True, polar_config=self.polar_config, quant_v=self.quant_v)
         for si, pn in enumerate(self.patch_nums):   # si: i-th segment
             if self._angle_stats is not None:
                 self._angle_stats.set_stage(si, pn)
@@ -242,17 +243,20 @@ class VAR(nn.Module):
                 x_BLC[0, 0, 0] += s
         return x_BLC    # logits BLV, V is vocab_size
     
-    def set_polar_quant(self, config: PolarQuantConfig | str | None = None) -> None:
-        """Set polar quantization config for K-cache during autoregressive_infer_cfg.
+    def set_polar_quant(self, config: PolarQuantConfig | str | None = None, quant_v: bool = True) -> None:
+        """Set polar quantization config for K-V cache during autoregressive_infer_cfg.
         
         Args:
             config: PolarQuantConfig, config name string (e.g. 'uniform_int4', 'fp6_e3m2'),
                     or None to disable polar quant (use standard FP16 K cache).
+            quant_v: if True (default), both K and V are polar-quantized;
+                     if False, only K is quantized, V stays FP16.
         """
         if config is None:
             self.polar_config = None
         else:
             self.polar_config = resolve_config(config)
+        self.quant_v = quant_v
 
     def set_angle_stats(self, collector) -> None:
         """Attach angle statistics collector to all attention blocks (for experiment scripts)."""

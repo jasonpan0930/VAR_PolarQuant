@@ -50,11 +50,12 @@ import torch
 
 import models.var as var_mod
 from models import build_vae_var
-from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook
+from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v
 from utils.theta2_kmeans import load_theta2_codebook
 
 OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse"
-THETA2_KMEANS_CODEBOOK = ROOT / "polar_quant_dumps" / "theta2_kmeans" / "codebook.json"
+THETA2_KMEANS_CODEBOOK = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30" / "codebook.json"
+THETA2_KMEANS_CODEBOOK_V = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30_v" / "codebook.json"
 MODEL_DEPTH = 30
 BATCH_SIZE = 1
 CLASS_LABELS = (22, 45, 123, 437, 701)
@@ -153,6 +154,12 @@ def maybe_register_kmeans_codebook() -> None:
         register_theta2_kmeans_codebook(centers)
     else:
         print(f"warning: {THETA2_KMEANS_CODEBOOK} not found, int6_kmeans_int4 may fail")
+    if THETA2_KMEANS_CODEBOOK_V.is_file():
+        v_centers, _ = load_theta2_codebook(THETA2_KMEANS_CODEBOOK_V)
+        register_theta2_kmeans_codebook_v(v_centers)
+        print(f"loaded V codebook from {THETA2_KMEANS_CODEBOOK_V}")
+    else:
+        print(f"warning: {THETA2_KMEANS_CODEBOOK_V} not found; V will fall back to K codebook")
 
 
 def _num_ar_stages(var) -> int:
@@ -206,6 +213,7 @@ def compute_method_block_metrics(
     method: str,
     baseline_outputs: Dict[int, List[torch.Tensor]],
     forced_stage_indices: List[torch.Tensor],
+    quant_v: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Returns (per_block_nmse, per_block_abs_mse, per_block_cosine_distance)."""
     num_stages = _num_ar_stages(var)
@@ -234,7 +242,7 @@ def compute_method_block_metrics(
     for i, block in enumerate(var.blocks):
         hooks.append(block.register_forward_hook(make_hook(i)))
 
-    var.set_polar_quant(method)
+    var.set_polar_quant(method, quant_v=quant_v)
     run_infer(var, label_B, device=device, forced_stage_indices=forced_stage_indices)
 
     for h in hooks:
@@ -281,6 +289,10 @@ def parse_args() -> argparse.Namespace:
         "--cumulative",
         action="store_true",
         help="Also plot/save sum_{b=1..d} NMSE_b (legacy; propagation is already in NMSE at depth d).",
+    )
+    p.add_argument(
+        "--quant-v", action=argparse.BooleanOptionalAction, default=True,
+        help="Quantize V cache (default: True); --no-quant-v for K-only comparison",
     )
     return p.parse_args()
 
@@ -347,7 +359,9 @@ def main() -> None:
     label_list = [int(x) for x in args.class_labels]
     if not label_list:
         raise ValueError("no class labels provided")
-    print(f"running labels={label_list}, seed={SEED}, cumulative={args.cumulative}")
+    quant_v = args.quant_v
+    quant_mode = "KV" if quant_v else "K-only"
+    print(f"running labels={label_list}, seed={SEED}, cumulative={args.cumulative}, quant_v={quant_v} ({quant_mode})")
 
     method_to_block_nmse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in METHODS}
     method_to_block_nrmse_pct_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in METHODS}
@@ -374,6 +388,7 @@ def main() -> None:
                 method=method,
                 baseline_outputs=baseline_outputs,
                 forced_stage_indices=baseline_stage_indices,
+                quant_v=quant_v,
             )
             per_block_nrmse_pct = 100.0 * np.sqrt(per_block_nmse)
             method_to_block_nmse_sum[method] += per_block_nmse
@@ -411,33 +426,34 @@ def main() -> None:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.out_prefix}_" if args.out_prefix else ""
+    mode_suffix = "KV" if quant_v else "Konly"
 
-    nrmse_fig_path = OUT_DIR / f"{prefix}nrmse_percent_at_depth_every4.png"
+    nrmse_fig_path = OUT_DIR / f"{prefix}nrmse_percent_at_depth_{mode_suffix}_every4.png"
     _plot_lines(
         sample_depths,
         method_to_nrmse_percent_at_depth,
         ylabel="NRMSE at depth d (%)",
-        title="Propagated block NRMSE vs baseline (FP16 K)",
+        title=f"Propagated block NRMSE vs baseline ({quant_mode} quant)",
         out_path=nrmse_fig_path,
     )
-    abs_fig_path = OUT_DIR / f"{prefix}abs_mse_at_depth_every4.png"
-    cos_fig_path = OUT_DIR / f"{prefix}cosine_distance_at_depth_every4.png"
+    abs_fig_path = OUT_DIR / f"{prefix}abs_mse_at_depth_{mode_suffix}_every4.png"
+    cos_fig_path = OUT_DIR / f"{prefix}cosine_distance_at_depth_{mode_suffix}_every4.png"
     _plot_lines(
         sample_depths,
         method_to_abs_mse_at_depth,
         ylabel="Mean squared error at depth d",
-        title="Absolute MSE (not / ||h_ref||^2) vs baseline",
+        title=f"Absolute MSE (not / ||h_ref||^2) vs baseline ({quant_mode})",
         out_path=abs_fig_path,
     )
     _plot_lines(
         sample_depths,
         method_to_cosine_distance_at_depth,
         ylabel="Cosine distance at depth d",
-        title="1 - cos(h_quant, h_ref) at block output",
+        title=f"1 - cos(h_quant, h_ref) at block output ({quant_mode})",
         out_path=cos_fig_path,
     )
 
-    json_path = OUT_DIR / f"{prefix}block_error_at_depth_every4.json"
+    json_path = OUT_DIR / f"{prefix}block_error_at_depth_{mode_suffix}_every4.json"
     payload = {
         "model_depth": MODEL_DEPTH,
         "seed": SEED,
@@ -445,6 +461,8 @@ def main() -> None:
         "top_k": TOP_K,
         "top_p": TOP_P,
         "forced_sampling_path": True,
+        "quant_v": quant_v,
+        "quant_mode": quant_mode,
         "class_labels": label_list,
         "num_class_labels": len(label_list),
         "every_n_depth": EVERY_N_DEPTH,
@@ -473,8 +491,8 @@ def main() -> None:
             m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in METHODS
         }
         method_to_cum_at_depth_pct = {m: [v * 100.0 for v in vals] for m, vals in method_to_cum_at_depth.items()}
-        cum_fig = OUT_DIR / f"{prefix}cumulative_nmse_every4.png"
-        cum_fig_pct = OUT_DIR / f"{prefix}cumulative_nmse_percent_every4.png"
+        cum_fig = OUT_DIR / f"{prefix}cumulative_nmse_{mode_suffix}_every4.png"
+        cum_fig_pct = OUT_DIR / f"{prefix}cumulative_nmse_percent_{mode_suffix}_every4.png"
         _plot_lines(
             sample_depths,
             method_to_cum_at_depth,
@@ -502,7 +520,7 @@ def main() -> None:
     print(f"saved plot -> {cos_fig_path}")
     print(f"saved data -> {json_path}")
     final_depth = sample_depths[-1]
-    print(f"at depth={final_depth} (avg over labels):")
+    print(f"at depth={final_depth} ({quant_mode}, avg over labels):")
     for method in METHODS:
         nrmse_pct = method_to_nrmse_percent_at_depth[method][-1]
         abs_m = method_to_abs_mse_at_depth[method][-1]

@@ -87,6 +87,9 @@ class PolarAngleStatsSession:
     # For K-means θ₂ codebook: FP θ₂ per angle + full-pipeline MSE weight (per K vector).
     theta2_kmeans_theta2: List[np.ndarray] = field(default_factory=list)
     theta2_kmeans_weights: List[np.ndarray] = field(default_factory=list)
+    # For V-means θ₂ codebook (same format, separate storage)
+    theta2_v_kmeans_theta2: List[np.ndarray] = field(default_factory=list)
+    theta2_v_kmeans_weights: List[np.ndarray] = field(default_factory=list)
 
     def set_stage(self, si: int, pn: int) -> None:
         self.stage_si, self.stage_pn = si, pn
@@ -161,8 +164,37 @@ class PolarAngleStatsSession:
             vidx = self._rng.choice(n_vec, size=self.max_k_vectors, replace=False)
             t2_mat = t2_mat[vidx]
             mse_vec = mse_vec[vidx]
-        self.theta2_kmeans_theta2.append(t2_mat.reshape(-1))
-        self.theta2_kmeans_weights.append(np.repeat(mse_vec, NUM_Q2))
+        # Only L0 θ₂ (first 16) — deeper layers tend toward π/4, less informative
+        t2_l0 = t2_mat[:, :16]
+        self.theta2_kmeans_theta2.append(t2_l0.reshape(-1))
+        self.theta2_kmeans_weights.append(np.repeat(mse_vec, 16))
+
+    def record_v(self, v_blhc: torch.Tensor, block_idx: int) -> None:
+        """Like record_k but for V vectors — only collects θ₂ for K-means codebook."""
+        if self.target_blocks is not None and block_idx not in self.target_blocks:
+            return
+        v = v_blhc[self.batch_index : self.batch_index + 1].float()
+        ang = encode_polar_k64_angles(v, config=_config)
+        bd = polar_k64_error_breakdown(v[0].reshape(-1, HEAD_DIM), config=_config)
+
+        mse_vec = bd['mse_after_full'].cpu().numpy().astype(np.float64).ravel()
+        t2_mat = ang['theta2'][0].reshape(-1, NUM_Q2).detach().cpu().numpy()
+        n_vec = t2_mat.shape[0]
+        if n_vec > self.max_k_vectors:
+            vidx = self._rng.choice(n_vec, size=self.max_k_vectors, replace=False)
+            t2_mat = t2_mat[vidx]
+            mse_vec = mse_vec[vidx]
+        t2_l0 = t2_mat[:, :16]
+        self.theta2_v_kmeans_theta2.append(t2_l0.reshape(-1))
+        self.theta2_v_kmeans_weights.append(np.repeat(mse_vec, 16))
+
+    def aggregate_theta2_mse_for_kmeans_v(self) -> Tuple[np.ndarray, np.ndarray]:
+        if not self.theta2_v_kmeans_theta2:
+            raise ValueError('no V θ₂ samples for K-means (set angle stats + record_v hook)')
+        return (
+            np.concatenate(self.theta2_v_kmeans_theta2),
+            np.concatenate(self.theta2_v_kmeans_weights),
+        )
 
     def aggregate_theta2_mse_for_kmeans(self) -> Tuple[np.ndarray, np.ndarray]:
         if not self.theta2_kmeans_theta2:
@@ -181,11 +213,13 @@ class PolarAngleStatsSession:
         for rec in self.k_error_records:
             for k in keys:
                 out[k].append(rec[k])
-            d = rec['dim_mean_abs_full']
-            dim_sum = d if dim_sum is None else dim_sum + d
-            dim_cnt += 1
+            if 'dim_mean_abs_full' in rec:
+                d = rec['dim_mean_abs_full']
+                dim_sum = d if dim_sum is None else dim_sum + d
+                dim_cnt += 1
         result = {k: np.concatenate(v) for k, v in out.items()}
-        result['dim_mean_abs_full'] = dim_sum / max(dim_cnt, 1)
+        if dim_sum is not None:
+            result['dim_mean_abs_full'] = dim_sum / max(dim_cnt, 1)
         return result
 
     def aggregate(self) -> Dict[str, np.ndarray]:

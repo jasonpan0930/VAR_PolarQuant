@@ -130,6 +130,7 @@ THETA2_FP6_E2M3 = AngleQuantScheme(
 
 # k-means scheme 由 register_theta2_kmeans_codebook() 動態植入
 THETA2_KMEANS_INT4: Optional[AngleQuantScheme] = None
+THETA2_KMEANS_INT4_V: Optional[AngleQuantScheme] = None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -199,6 +200,25 @@ def register_theta2_kmeans_codebook(
     )
     global THETA2_KMEANS_INT4
     THETA2_KMEANS_INT4 = scheme
+    POLAR_QUANT_CONFIGS[config_name] = PolarQuantConfig(
+        config_name, label, THETA1_INT6_UNIFORM, scheme,
+    )
+    return scheme
+
+
+def register_theta2_kmeans_codebook_v(
+    centers: Sequence[float],
+    config_name: str = 'int6_kmeans_int4_v',
+    label: str = 'INT6 θ₁ + K-means INT4 θ₂ (V, MSE-weighted)',
+) -> AngleQuantScheme:
+    if len(centers) != 16:
+        raise ValueError(f'K-means θ₂ needs 16 centers, got {len(centers)}')
+    scheme = AngleQuantScheme(
+        name='kmeans_int4_v', label='K-means INT4 (V, MSE-weighted)',
+        codebook=tuple(float(c) for c in sorted(centers)),
+    )
+    global THETA2_KMEANS_INT4_V
+    THETA2_KMEANS_INT4_V = scheme
     POLAR_QUANT_CONFIGS[config_name] = PolarQuantConfig(
         config_name, label, THETA1_INT6_UNIFORM, scheme,
     )

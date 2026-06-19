@@ -23,10 +23,10 @@
 # gtest walltime cap is 30 min; re-submit the same command to continue (--skip-existing).
 #SBATCH --array=0-7
 #SBATCH -J var_fid
-#SBATCH -o /home/jasonpan0930/VAR_research/VAR_PolarQuant/logs/fid_%x_%A_%a.out
+#SBATCH -o /home/jasonpan0930/var_research/VAR_polarQuant/logs/fid_%x_%A_%a.out
 
 set -euo pipefail
-ROOT="/home/jasonpan0930/VAR_research/VAR_PolarQuant"
+ROOT="/home/jasonpan0930/var_research/VAR_polarQuant"
 cd "${ROOT}"
 
 # $1 = --polar-quant for exp/exp_fid_sample.py (θ₁ is always INT6 except baseline)
@@ -49,7 +49,7 @@ POLAR_QUANT="${1:-none}"
 PYTHON="${PYTHON:-/home/jasonpan0930/.conda/envs/var_env/bin/python}"
 DEPTH="${MODEL_DEPTH:-16}"
 
-N_SHARDS=8
+N_SHARDS="${N_SHARDS:-8}"
 CLASSES_PER=$(( (1000 + N_SHARDS - 1) / N_SHARDS ))
 CLASS_START=$(( SLURM_ARRAY_TASK_ID * CLASSES_PER ))
 CLASS_END=$(( CLASS_START + CLASSES_PER - 1 ))
@@ -73,7 +73,15 @@ if (( SKIP )); then
   SKIP_ARGS=(--skip-existing)
 fi
 
-echo "shard=${SLURM_ARRAY_TASK_ID} polar=${POLAR_QUANT} depth=${DEPTH} classes=[${CLASS_START},${CLASS_END}] skip=${SKIP} -> ${OUT_DIR}"
+QUANT_V="${QUANT_V:-1}"
+QUANT_V_ARGS=()
+if (( QUANT_V )); then
+  QUANT_V_ARGS=(--quant-v)
+else
+  QUANT_V_ARGS=(--no-quant-v)
+fi
+
+echo "shard=${SLURM_ARRAY_TASK_ID} polar=${POLAR_QUANT} depth=${DEPTH} classes=[${CLASS_START},${CLASS_END}] skip=${SKIP} quant_v=${QUANT_V} -> ${OUT_DIR}"
 
 "${PYTHON}" "${ROOT}/exp/exp_fid_sample.py" \
   --model-depth "${DEPTH}" \
@@ -82,4 +90,5 @@ echo "shard=${SLURM_ARRAY_TASK_ID} polar=${POLAR_QUANT} depth=${DEPTH} classes=[
   --class-start "${CLASS_START}" \
   --class-end "${CLASS_END}" \
   "${KMEANS_ARGS[@]}" \
+  "${QUANT_V_ARGS[@]}" \
   "${SKIP_ARGS[@]}"
