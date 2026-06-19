@@ -20,6 +20,8 @@ Free-running mode outputs:
   .../<prefix>token_disagree_{mode_suffix}.png                 (token disagree bar)
   .../<prefix>fhat_nrmse_{mode_suffix}.png                     (f_hat NRMSE per scale)
   .../<prefix>fhat_cos_{mode_suffix}.png                       (f_hat cosine distance per scale)
+  .../<prefix>fhat_spatial_cos_scale9_{method}_...png          (f_hat per-position cos, scale 9, 16×16)
+  .../<prefix>fhat_spatial_cos_mean_{mode_suffix}.png          (mean per-position f_hat cos per scale)
   .../<prefix>free_running_metrics_{mode_suffix}.json
 
 Usage:
@@ -771,6 +773,10 @@ def main_free(args) -> None:
     method_fhat_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
     # f_hat cosine distance per scale: (num_stages,) sum
     method_fhat_cos_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
+    # f_hat per-spatial-position cosine distance: (num_stages, H, W) sum
+    # H, W are determined from first f_hat snapshot (all f_hat snapshots are same spatial size)
+    method_fhat_spatial_cos_sum: Dict[str, np.ndarray] = {m: None for m in methods}
+    method_fhat_spatial_count: Dict[str, int] = {m: 0 for m in methods}
 
     for label in label_list:
         label_B = torch.tensor([label], device=device)
@@ -839,6 +845,26 @@ def main_free(args) -> None:
                 method_fhat_sum[method][si] += fhat_nrmse
                 method_fhat_cos_sum[method][si] += fhat_cos
 
+            # ── f_hat per-spatial-position cosine distance ──
+            for si in range(num_stages):
+                bf = base_fhat[si]
+                qf = quant_fhat[si]
+                if bf is not None and qf is not None:
+                    B, C, H, W = bf.shape
+                    # per-position cosine distance: (H, W)
+                    bf_flat = bf[0].reshape(C, -1)  # (C, H*W)
+                    qf_flat = qf[0].reshape(C, -1)
+                    b_norms = bf_flat.norm(dim=0)     # (H*W,)
+                    q_norms = qf_flat.norm(dim=0)     # (H*W,)
+                    dots = (bf_flat * qf_flat).sum(dim=0)  # (H*W,)
+                    denom = (b_norms * q_norms).clamp(min=1e-12)
+                    cos_sim = (dots / denom).clamp(-1.0, 1.0)
+                    spatial_cos_dist = (1.0 - cos_sim).reshape(H, W).numpy().astype(np.float64)
+                    if method_fhat_spatial_cos_sum[method] is None:
+                        method_fhat_spatial_cos_sum[method] = np.zeros((num_stages, H, W), dtype=np.float64)
+                    method_fhat_spatial_cos_sum[method][si] += spatial_cos_dist
+            method_fhat_spatial_count[method] += 1
+
     # ── average over labels ──
     n_labels = float(len(label_list))
     method_heatmap: Dict[str, np.ndarray] = {
@@ -856,6 +882,17 @@ def main_free(args) -> None:
     method_fhat_cos: Dict[str, List[float]] = {
         m: (method_fhat_cos_sum[m] / n_labels).tolist() for m in methods
     }
+    # per-spatial-position f_hat cosine: (num_stages, H, W) avg
+    method_fhat_spatial: Dict[str, np.ndarray] = {}
+    method_fhat_spatial_mean_per_scale: Dict[str, List[float]] = {}  # per-scale mean cos dist
+    for m in methods:
+        if method_fhat_spatial_cos_sum[m] is not None:
+            cnt = max(method_fhat_spatial_count[m], 1)
+            method_fhat_spatial[m] = method_fhat_spatial_cos_sum[m] / cnt
+            method_fhat_spatial_mean_per_scale[m] = method_fhat_spatial[m].mean(axis=(1, 2)).tolist()
+        else:
+            method_fhat_spatial[m] = np.zeros((num_stages, 1, 1))
+            method_fhat_spatial_mean_per_scale[m] = [0.0] * num_stages
 
     # ── save outputs ──
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -929,6 +966,32 @@ def main_free(args) -> None:
     _plot_fhat_metric(method_fhat_cos, num_stages, fhat_cos_path, ylabel="f_hat cosine distance", quant_mode=quant_mode)
     print(f"saved f_hat cosine distance -> {fhat_cos_path}")
 
+    # f_hat per-spatial-position cosine distance — spatial heatmaps (last scale, one per method)
+    H_spat, W_spat = method_fhat_spatial[methods[0]].shape[1], method_fhat_spatial[methods[0]].shape[2]
+    for method in methods:
+        spat_hm_path = OUT_DIR / f"{prefix}fhat_spatial_cos_scale9_{method}_{mode_suffix}.png"
+        _plot_heatmap(
+            method_fhat_spatial[method][-1],  # last scale
+            ylabel="spatial row",
+            title=f"f_hat per-position cos distance scale 9 ({method}, {quant_mode})",
+            out_path=spat_hm_path,
+            num_stages=H_spat,
+            num_blocks=W_spat,
+            xlabel="spatial column",
+            cbar_label="cosine distance",
+            cmap="YlOrRd",
+        )
+        print(f"saved f_hat spatial cos heatmap (scale 9) -> {spat_hm_path}")
+
+    # f_hat per-spatial-position mean cosine distance per scale (line plot, all methods)
+    spat_mean_path = OUT_DIR / f"{prefix}fhat_spatial_cos_mean_{mode_suffix}.png"
+    _plot_fhat_metric(
+        method_fhat_spatial_mean_per_scale, num_stages, spat_mean_path,
+        ylabel="mean per-position cos distance",
+        quant_mode=quant_mode,
+    )
+    print(f"saved f_hat spatial cos mean per scale -> {spat_mean_path}")
+
     # JSON
     json_path = OUT_DIR / f"{prefix}free_running_metrics_{mode_suffix}.json"
     payload = {
@@ -943,12 +1006,16 @@ def main_free(args) -> None:
             "token_disagree_per_scale": "fraction of tokens that differ from baseline at each scale",
             "fhat_nrmse_per_scale": "NRMSE (%) of the accumulated f_hat latent map after each scale",
             "fhat_cosine_distance_per_scale": "cosine distance of f_hat latent map at each scale",
+            "fhat_spatial_cos_per_scale": "per-spatial-position f_hat cosine distance (num_stages, H, W), rows=scales, then H×W spatial",
+            "fhat_spatial_cos_mean_per_scale": "mean per-position f_hat cosine distance per scale",
         },
         "heatmap_nrmse": {m: method_heatmap[m].tolist() for m in methods},
         "heatmap_cosine_distance": {m: method_cos_heatmap[m].tolist() for m in methods},
         "token_disagree_per_scale": method_tok_disagree,
         "fhat_nrmse_per_scale": method_fhat_nrmse,
         "fhat_cosine_distance_per_scale": method_fhat_cos,
+        "fhat_spatial_cos_per_scale": {m: method_fhat_spatial[m].tolist() for m in methods},
+        "fhat_spatial_cos_mean_per_scale": method_fhat_spatial_mean_per_scale,
     }
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True, indent=2)
@@ -989,6 +1056,19 @@ def main_free(args) -> None:
         chm = method_cos_heatmap[method]
         print(f"  {method:20s}  mean={chm.mean():.6f}  max={chm.max():.6f}  "
               f"last_scale_mean={chm[-1,:].mean():.6f}")
+
+    print(f"\nf_hat per-spatial-position cos distance mean per scale ({quant_mode}, free-running):")
+    header = f"{'scale':>6s}  " + "  ".join(f"{m:>20s}" for m in methods)
+    print(header)
+    for si in range(num_stages):
+        vals = "  ".join(f"{method_fhat_spatial_mean_per_scale[m][si]:>19.6f}" for m in methods)
+        print(f"  {si:>4d}  {vals}")
+
+    print(f"\nf_hat spatial cos distance summary (scale 9, {quant_mode}, free-running):")
+    for method in methods:
+        smap = method_fhat_spatial[method][-1]  # last scale, (H, W)
+        print(f"  {method:20s}  mean={smap.mean():.6f}  max={smap.max():.6f}  "
+              f"min={smap.min():.6f}  H={smap.shape[0]} W={smap.shape[1]}")
 
 
 if __name__ == "__main__":
