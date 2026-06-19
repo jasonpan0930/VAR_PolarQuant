@@ -14,9 +14,12 @@ Forced mode outputs:
 
 Free-running mode outputs:
   .../<prefix>heatmap_nrmse_{method}_{mode_suffix}.png         (scale × block heatmap)
+  .../<prefix>heatmap_cos_{method}_{mode_suffix}.png           (scale × block cosine distance)
   .../<prefix>perscale_nrmse_{method}_{mode_suffix}.png        (per-scale line plot)
+  .../<prefix>perscale_cos_{method}_{mode_suffix}.png          (per-scale cosine distance)
   .../<prefix>token_disagree_{mode_suffix}.png                 (token disagree bar)
   .../<prefix>fhat_nrmse_{mode_suffix}.png                     (f_hat NRMSE per scale)
+  .../<prefix>fhat_cos_{mode_suffix}.png                       (f_hat cosine distance per scale)
   .../<prefix>free_running_metrics_{mode_suffix}.json
 
 Usage:
@@ -273,6 +276,10 @@ def collect_free_run_outputs(
     for bi in range(num_blocks):
         if len(block_outputs[bi]) != num_stages:
             raise RuntimeError(f"block {bi}: expected {num_stages} stages, got {len(block_outputs[bi])}")
+    if len(stage_indices) != num_stages:
+        raise RuntimeError(f"sampler: expected {num_stages} stages, got {len(stage_indices)}")
+    if len(f_hat_snapshots) != num_stages:
+        raise RuntimeError(f"f_hat hook: expected {num_stages} stages, got {len(f_hat_snapshots)}")
 
     return block_outputs, stage_indices, f_hat_snapshots
 
