@@ -1,20 +1,31 @@
 """
 Cross-block propagated NMSE (baseline vs polar quant), sampled every N depths.
 
-Default plot uses NMSE at depth d only (propagation already included in block-d output).
-Optional --cumulative adds sum_{b=1..d} NMSE_b (legacy, can double-count propagation).
+Modes (--mode):
+  forced (default): same token-path via forced sampler; compares last AR stage only
+  free: free-running — same seed, no forced sampler; quant model generates its own tokens
+  both: run both forced and free
 
-Usage:
-  cd VAR_polarQuant
-  python exp/exp_cross_block_cumulative_mse.py --class-labels 22 45 123 --out-prefix labels3
-
-Outputs (default):
+Forced mode outputs:
   polar_quant_dumps/cross_block_mse/<prefix>nrmse_percent_at_depth_every4.png
   polar_quant_dumps/cross_block_mse/<prefix>abs_mse_at_depth_every4.png
   polar_quant_dumps/cross_block_mse/<prefix>cosine_distance_at_depth_every4.png
   polar_quant_dumps/cross_block_mse/<prefix>block_error_at_depth_every4.json
 
-With --cumulative (additional):
+Free-running mode outputs:
+  .../<prefix>heatmap_nrmse_{method}_{mode_suffix}.png         (scale × block heatmap)
+  .../<prefix>perscale_nrmse_{method}_{mode_suffix}.png        (per-scale line plot)
+  .../<prefix>token_disagree_{mode_suffix}.png                 (token disagree bar)
+  .../<prefix>fhat_nrmse_{mode_suffix}.png                     (f_hat NRMSE per scale)
+  .../<prefix>free_running_metrics_{mode_suffix}.json
+
+Usage:
+  cd VAR_polarQuant
+  python exp/exp_cross_block_cumulative_mse.py --class-labels 22 45 123 --out-prefix labels3
+  python exp/exp_cross_block_cumulative_mse.py --class-labels 22 45 123 --mode free
+  python exp/exp_cross_block_cumulative_mse.py --class-labels 22 45 123 --mode both
+
+With --cumulative (additional, forced mode):
   .../<prefix>cumulative_nmse_every4.png
   .../<prefix>cumulative_nmse_percent_every4.png
 
@@ -206,6 +217,66 @@ def collect_baseline_block_outputs_and_indices(
     return block_outputs, stage_indices
 
 
+def collect_free_run_outputs(
+    var, label_B: torch.Tensor, device: str,
+    method: str = None, quant_v: bool = True,
+) -> tuple[Dict[int, List[torch.Tensor]], List[torch.Tensor], List[torch.Tensor]]:
+    """
+    Free-running inference (no forced sampler). Returns:
+      - block_outputs: {block_idx: [stage0_out, stage1_out, ..., stage9_out]}
+      - stage_indices: list of tensors (one per scale), each (B, patch_num²)
+      - f_hat_snapshots: list of tensors (one per scale), each (B, Cvae, HW, HW)
+    """
+    num_stages = _num_ar_stages(var)
+    num_blocks = len(var.blocks)
+    block_outputs: Dict[int, List[torch.Tensor]] = {bi: [] for bi in range(num_blocks)}
+    stage_indices: List[torch.Tensor] = []
+    f_hat_snapshots: List[torch.Tensor] = []
+    hooks = []
+
+    def make_block_hook(bi: int):
+        def _hook(_module, _inputs, output):
+            block_outputs[bi].append(output.detach().float().cpu())
+            if len(block_outputs[bi]) > num_stages:
+                raise RuntimeError(f"block {bi}: more than {num_stages} forwards (unexpected AR loop)")
+        return _hook
+
+    for bi, block in enumerate(var.blocks):
+        hooks.append(block.register_forward_hook(make_block_hook(bi)))
+
+    # Hook sampler to record stage indices
+    orig_sampler = var_mod.sample_with_top_k_top_p_
+    def _record_sampler(logits_BlV, top_k=0, top_p=0.0, rng=None, num_samples=1):
+        out = orig_sampler(logits_BlV, top_k=top_k, top_p=top_p, rng=rng, num_samples=num_samples)
+        stage_indices.append(out[:, :, 0].detach().cpu())
+        return out
+    var_mod.sample_with_top_k_top_p_ = _record_sampler
+
+    # Hook f_hat after each scale's get_next_autoregressive_input
+    vae_proxy = var.vae_quant_proxy[0]
+    orig_get_next = vae_proxy.get_next_autoregressive_input
+    def _patched_get_next(si: int, SN: int, f_hat: torch.Tensor, h_BChw: torch.Tensor):
+        new_f_hat, next_token_map = orig_get_next(si, SN, f_hat, h_BChw)
+        f_hat_snapshots.append(new_f_hat.detach().float().cpu().clone())
+        return new_f_hat, next_token_map
+    vae_proxy.get_next_autoregressive_input = _patched_get_next
+
+    try:
+        var.set_polar_quant(method, quant_v=quant_v) if method is not None else var.set_polar_quant(None)
+        run_infer(var, label_B, device=device)
+    finally:
+        var_mod.sample_with_top_k_top_p_ = orig_sampler
+        vae_proxy.get_next_autoregressive_input = orig_get_next
+        for h in hooks:
+            h.remove()
+
+    for bi in range(num_blocks):
+        if len(block_outputs[bi]) != num_stages:
+            raise RuntimeError(f"block {bi}: expected {num_stages} stages, got {len(block_outputs[bi])}")
+
+    return block_outputs, stage_indices, f_hat_snapshots
+
+
 def compute_method_block_metrics(
     var,
     label_B: torch.Tensor,
@@ -301,6 +372,13 @@ def parse_args() -> argparse.Namespace:
              "Example: --per-level-kmeans my_11144 1,1,1,4,4 my_12345 1,2,3,4,5\n"
              "Loads codebooks from polar_quant_dumps/theta2_kmeans_d30_T{N}/codebook.json",
     )
+    p.add_argument(
+        "--mode", type=str, default="forced", choices=["forced", "free", "both"],
+        help="Comparison mode:\n"
+             "  forced: current default — forced token path, last scale only\n"
+             "  free:   free-running — same seed, no forced sampler, all scales\n"
+             "  both:   run both forced and free",
+    )
     return p.parse_args()
 
 
@@ -324,23 +402,144 @@ def _plot_lines(
     plt.close(fig)
 
 
+def _plot_heatmap(
+    data: np.ndarray,
+    ylabel: str,
+    title: str,
+    out_path: Path,
+    num_stages: int,
+    num_blocks: int,
+    xlabel: str = "Block depth",
+) -> None:
+    """Plot a 2D heatmap: rows = scales, cols = blocks."""
+    fig, ax = plt.subplots(figsize=(max(8, num_blocks * 0.28), max(4, num_stages * 0.45)))
+    im = ax.imshow(data, aspect="auto", origin="upper", cmap="YlOrRd", vmin=0)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_xticks(range(num_blocks))
+    ax.set_xticklabels([f"{b+1}" for b in range(num_blocks)], fontsize=7, rotation=90)
+    ax.set_yticks(range(num_stages))
+    ax.set_yticklabels([f"scale {s}" for s in range(num_stages)], fontsize=8)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("NRMSE (%)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_token_disagree(
+    disagree_pct: Dict[str, List[float]],
+    num_stages: int,
+    out_path: Path,
+    quant_mode: str = "KV",
+) -> None:
+    """Bar chart: token disagreement rate per scale."""
+    fig, ax = plt.subplots(figsize=(max(8, num_stages * 0.7), 5.2))
+    n_methods = len(disagree_pct)
+    bar_width = 0.8 / max(n_methods, 1)
+    x = np.arange(num_stages)
+    colors = plt.cm.tab10(np.linspace(0, 1, n_methods))
+    for mi, (method, vals) in enumerate(disagree_pct.items()):
+        ax.bar(x + mi * bar_width - (n_methods - 1) * bar_width / 2, vals, bar_width,
+               label=method, color=colors[mi % 10])
+    ax.set_xlabel("Scale")
+    ax.set_ylabel("Token disagreement rate")
+    ax.set_title(f"Token disagreement per scale (free-running, {quant_mode} quant)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{s}" for s in range(num_stages)])
+    ax.legend(fontsize=7)
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_fhat_nrmse(
+    fhat_nrmse_pct: Dict[str, List[float]],
+    num_stages: int,
+    out_path: Path,
+    quant_mode: str = "KV",
+) -> None:
+    """Line plot: f_hat NRMSE (%) per scale."""
+    fig, ax = plt.subplots(figsize=(8.4, 5.2))
+    x = list(range(num_stages))
+    for method, vals in fhat_nrmse_pct.items():
+        ax.plot(x, vals, marker="o", linewidth=2.0, label=method)
+    ax.set_xlabel("Scale")
+    ax.set_ylabel("f_hat NRMSE (%)")
+    ax.set_title(f"f_hat NRMSE per scale (free-running, {quant_mode} quant)")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def _plot_per_scale_lines(
+    nrmse_by_scale: Dict[int, List[float]],
+    num_blocks: int,
+    out_path: Path,
+    method_label: str,
+    quant_mode: str = "KV",
+) -> None:
+    """Per-scale line plot: NRMSE vs block depth for each scale."""
+    fig, ax = plt.subplots(figsize=(8.4, 5.2))
+    x = list(range(1, num_blocks + 1))
+    colors = plt.cm.viridis(np.linspace(0, 1, len(nrmse_by_scale)))
+    for si in sorted(nrmse_by_scale.keys()):
+        color = colors[si] if si < len(colors) else None
+        ax.plot(x, nrmse_by_scale[si], marker=".", linewidth=1.2,
+                label=f"scale {si}", color=color)
+    ax.set_xlabel("Block depth")
+    ax.set_ylabel("NRMSE (%)")
+    ax.set_title(f"Per-scale block NRMSE ({method_label}, {quant_mode} quant)")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
 def main() -> None:
     global SEED
     args = parse_args()
     SEED = int(args.seed)
+    mode = args.mode
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"device: {device}")
-    if device != "cuda":
-        print("warning: CUDA unavailable; this run will be slow.")
+    if mode == "both":
+        main_forced(args)
+        print("\n" + "=" * 60 + "\n")
+        main_free(args)
+    elif mode == "free":
+        main_free(args)
+    else:
+        main_forced(args)
 
-    maybe_register_kmeans_codebook()
 
-    quant_v = args.quant_v
+def _build_model(device: str):
+    """Build and load VAR model, return (vae, var)."""
+    setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
+    setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
+    vae_ckpt = ROOT / "vae_ch160v4096z32.pth"
+    var_ckpt = ROOT / f"var_d{MODEL_DEPTH}.pth"
+    patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+    vae, var = build_vae_var(
+        V=4096, Cvae=32, ch=160, share_quant_resi=4,
+        device=device, patch_nums=patch_nums, num_classes=1000,
+        depth=MODEL_DEPTH, shared_aln=False,
+    )
+    vae.load_state_dict(torch.load(vae_ckpt, map_location="cpu"), strict=True)
+    var.load_state_dict(torch.load(var_ckpt, map_location="cpu"), strict=True)
+    vae.eval()
+    var.eval()
+    return vae, var
 
-    # ── per-level kmeans: register extra configs & add to METHODS ──
+
+def _register_per_level_configs(per_level_args: list, quant_v: bool) -> tuple:
+    """Register per-level kmeans configs and return (methods_list, methods)."""
     methods_list = list(METHODS)
-    pl = args.per_level_kmeans
+    pl = per_level_args
     if len(pl) % 2 != 0:
         raise ValueError("--per-level-kmeans requires even number of args (pairs of NAME LEVELS)")
     for i in range(0, len(pl), 2):
@@ -361,7 +560,6 @@ def main() -> None:
         label = f'INT6 θ₁ + per-level K-means θ₂ ({level_str})'
         register_per_level_codebook(centers_per_level, config_name=config_name, label=label)
         methods_list.append(config_name)
-        # V per-level (if quant_v and codebooks exist)
         if quant_v:
             v_cb_cache: Dict[int, list] = {}
             all_v_found = True
@@ -380,40 +578,31 @@ def main() -> None:
             else:
                 print(f'  [per-level] warning: V codebooks incomplete for {config_name}, V will fall back to K codebook')
         print(f'  [per-level] registered config: {config_name} ({level_str})')
-    methods = tuple(methods_list)
+    return methods_list, tuple(methods_list)
 
-    setattr(torch.nn.Linear, "reset_parameters", lambda self: None)
-    setattr(torch.nn.LayerNorm, "reset_parameters", lambda self: None)
 
-    vae_ckpt = ROOT / "vae_ch160v4096z32.pth"
-    var_ckpt = ROOT / f"var_d{MODEL_DEPTH}.pth"
-    patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+def main_forced(args) -> None:
+    """Current forced-sampler mode: compare last scale only."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {device}")
+    if device != "cuda":
+        print("warning: CUDA unavailable; this run will be slow.")
+    maybe_register_kmeans_codebook()
+    quant_v = args.quant_v
+    methods_list, methods = _register_per_level_configs(args.per_level_kmeans, quant_v)
 
-    vae, var = build_vae_var(
-        V=4096,
-        Cvae=32,
-        ch=160,
-        share_quant_resi=4,
-        device=device,
-        patch_nums=patch_nums,
-        num_classes=1000,
-        depth=MODEL_DEPTH,
-        shared_aln=False,
-    )
-    vae.load_state_dict(torch.load(vae_ckpt, map_location="cpu"), strict=True)
-    var.load_state_dict(torch.load(var_ckpt, map_location="cpu"), strict=True)
-    vae.eval()
-    var.eval()
+    vae, var = _build_model(device)
 
     depth = len(var.blocks)
     sample_idx = depth_samples(depth, every=EVERY_N_DEPTH)
     sample_depths = (sample_idx + 1).tolist()
+    num_stages = _num_ar_stages(var)
 
     label_list = [int(x) for x in args.class_labels]
     if not label_list:
         raise ValueError("no class labels provided")
     quant_mode = "KV" if quant_v else "K-only"
-    print(f"running labels={label_list}, seed={SEED}, cumulative={args.cumulative}, quant_v={quant_v} ({quant_mode})")
+    print(f"running labels={label_list}, seed={SEED}, cumulative={args.cumulative}, quant_v={quant_v} ({quant_mode}), mode=forced")
 
     method_to_block_nmse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
     method_to_block_nrmse_pct_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
@@ -434,10 +623,7 @@ def main() -> None:
                 raise ValueError(f"unknown method: {method}")
             print(f"[label={label}] computing method={method}...")
             per_block_nmse, per_block_abs_mse, per_block_cos = compute_method_block_metrics(
-                var,
-                label_B,
-                device=device,
-                method=method,
+                var, label_B, device=device, method=method,
                 baseline_outputs=baseline_outputs,
                 forced_stage_indices=baseline_stage_indices,
                 quant_v=quant_v,
@@ -454,77 +640,46 @@ def main() -> None:
                 method_to_cum_at_depth_sum[method] += np.cumsum(per_block_nmse)[sample_idx]
 
     n_labels = float(len(label_list))
-    method_to_block_nmse: Dict[str, List[float]] = {
-        m: (method_to_block_nmse_sum[m] / n_labels).tolist() for m in methods
-    }
-    method_to_block_nrmse_percent: Dict[str, List[float]] = {
-        m: (method_to_block_nrmse_pct_sum[m] / n_labels).tolist() for m in methods
-    }
-    method_to_nrmse_percent_at_depth: Dict[str, List[float]] = {
-        m: (method_to_nrmse_at_depth_sum[m] / n_labels).tolist() for m in methods
-    }
-    method_to_block_abs_mse: Dict[str, List[float]] = {
-        m: (method_to_block_abs_mse_sum[m] / n_labels).tolist() for m in methods
-    }
-    method_to_abs_mse_at_depth: Dict[str, List[float]] = {
-        m: (method_to_abs_at_depth_sum[m] / n_labels).tolist() for m in methods
-    }
-    method_to_block_cosine_distance: Dict[str, List[float]] = {
-        m: (method_to_block_cos_sum[m] / n_labels).tolist() for m in methods
-    }
-    method_to_cosine_distance_at_depth: Dict[str, List[float]] = {
-        m: (method_to_cos_at_depth_sum[m] / n_labels).tolist() for m in methods
-    }
+    method_to_block_nmse: Dict[str, List[float]] = {m: (method_to_block_nmse_sum[m] / n_labels).tolist() for m in methods}
+    method_to_block_nrmse_percent: Dict[str, List[float]] = {m: (method_to_block_nrmse_pct_sum[m] / n_labels).tolist() for m in methods}
+    method_to_nrmse_percent_at_depth: Dict[str, List[float]] = {m: (method_to_nrmse_at_depth_sum[m] / n_labels).tolist() for m in methods}
+    method_to_block_abs_mse: Dict[str, List[float]] = {m: (method_to_block_abs_mse_sum[m] / n_labels).tolist() for m in methods}
+    method_to_abs_mse_at_depth: Dict[str, List[float]] = {m: (method_to_abs_at_depth_sum[m] / n_labels).tolist() for m in methods}
+    method_to_block_cosine_distance: Dict[str, List[float]] = {m: (method_to_block_cos_sum[m] / n_labels).tolist() for m in methods}
+    method_to_cosine_distance_at_depth: Dict[str, List[float]] = {m: (method_to_cos_at_depth_sum[m] / n_labels).tolist() for m in methods}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.out_prefix}_" if args.out_prefix else ""
     mode_suffix = "KV" if quant_v else "Konly"
 
     nrmse_fig_path = OUT_DIR / f"{prefix}nrmse_percent_at_depth_{mode_suffix}_every4.png"
-    _plot_lines(
-        sample_depths,
-        method_to_nrmse_percent_at_depth,
-        ylabel="NRMSE at depth d (%)",
-        title=f"Propagated block NRMSE vs baseline ({quant_mode} quant)",
-        out_path=nrmse_fig_path,
-    )
+    _plot_lines(sample_depths, method_to_nrmse_percent_at_depth,
+                ylabel="NRMSE at depth d (%)",
+                title=f"Propagated block NRMSE vs baseline ({quant_mode} quant, forced token path)",
+                out_path=nrmse_fig_path)
     abs_fig_path = OUT_DIR / f"{prefix}abs_mse_at_depth_{mode_suffix}_every4.png"
     cos_fig_path = OUT_DIR / f"{prefix}cosine_distance_at_depth_{mode_suffix}_every4.png"
-    _plot_lines(
-        sample_depths,
-        method_to_abs_mse_at_depth,
-        ylabel="Mean squared error at depth d",
-        title=f"Absolute MSE (not / ||h_ref||^2) vs baseline ({quant_mode})",
-        out_path=abs_fig_path,
-    )
-    _plot_lines(
-        sample_depths,
-        method_to_cosine_distance_at_depth,
-        ylabel="Cosine distance at depth d",
-        title=f"1 - cos(h_quant, h_ref) at block output ({quant_mode})",
-        out_path=cos_fig_path,
-    )
+    _plot_lines(sample_depths, method_to_abs_mse_at_depth,
+                ylabel="Mean squared error at depth d",
+                title=f"Absolute MSE (not / ||h_ref||^2) vs baseline ({quant_mode})",
+                out_path=abs_fig_path)
+    _plot_lines(sample_depths, method_to_cosine_distance_at_depth,
+                ylabel="Cosine distance at depth d",
+                title=f"1 - cos(h_quant, h_ref) at block output ({quant_mode})",
+                out_path=cos_fig_path)
 
     json_path = OUT_DIR / f"{prefix}block_error_at_depth_{mode_suffix}_every4.json"
     payload = {
-        "model_depth": MODEL_DEPTH,
-        "seed": SEED,
-        "cfg": CFG,
-        "top_k": TOP_K,
-        "top_p": TOP_P,
-        "forced_sampling_path": True,
-        "quant_v": quant_v,
-        "quant_mode": quant_mode,
-        "class_labels": label_list,
-        "num_class_labels": len(label_list),
-        "every_n_depth": EVERY_N_DEPTH,
-        "sample_depths": sample_depths,
+        "model_depth": MODEL_DEPTH, "seed": SEED, "cfg": CFG, "top_k": TOP_K, "top_p": TOP_P,
+        "forced_sampling_path": True, "quant_v": quant_v, "quant_mode": quant_mode,
+        "class_labels": label_list, "num_class_labels": len(label_list),
+        "every_n_depth": EVERY_N_DEPTH, "sample_depths": sample_depths,
         "metric": {
             "nmse_at_block_b": "sum((x_q-x_r)^2) / sum(x_r^2), last AR stage only",
             "nrmse_percent_at_block_b": "sqrt(nmse_at_block_b) * 100",
             "abs_mse_at_block_b": "mean((x_q-x_r)^2), not divided by sum(x_r^2)",
             "cosine_distance_at_block_b": "1 - dot(x_q,x_r)/(||x_q||*||x_r||)",
-            "num_ar_stages": _num_ar_stages(var),
+            "num_ar_stages": num_stages,
             "at_depth_d": "block index b = d-1; includes propagation from earlier blocks",
             "x_ref": "baseline block output (enable_polar_k_cache=False)",
             "x_quant": "polar-quant block output (same forced token path as baseline)",
@@ -537,28 +692,15 @@ def main() -> None:
         "abs_mse_at_depth_every_n": method_to_abs_mse_at_depth,
         "cosine_distance_at_depth_every_n": method_to_cosine_distance_at_depth,
     }
-
     if args.cumulative:
-        method_to_cum_at_depth: Dict[str, List[float]] = {
-            m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in methods
-        }
+        method_to_cum_at_depth: Dict[str, List[float]] = {m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in methods}
         method_to_cum_at_depth_pct = {m: [v * 100.0 for v in vals] for m, vals in method_to_cum_at_depth.items()}
         cum_fig = OUT_DIR / f"{prefix}cumulative_nmse_{mode_suffix}_every4.png"
         cum_fig_pct = OUT_DIR / f"{prefix}cumulative_nmse_percent_{mode_suffix}_every4.png"
-        _plot_lines(
-            sample_depths,
-            method_to_cum_at_depth,
-            ylabel="Cumulative NMSE (sum over blocks 1..d)",
-            title="Legacy: summed per-block NMSE vs baseline",
-            out_path=cum_fig,
-        )
-        _plot_lines(
-            sample_depths,
-            method_to_cum_at_depth_pct,
-            ylabel="Cumulative NMSE (%)",
-            title="Legacy: summed per-block NMSE vs baseline",
-            out_path=cum_fig_pct,
-        )
+        _plot_lines(sample_depths, method_to_cum_at_depth, ylabel="Cumulative NMSE (sum over blocks 1..d)",
+                    title="Legacy: summed per-block NMSE vs baseline", out_path=cum_fig)
+        _plot_lines(sample_depths, method_to_cum_at_depth_pct, ylabel="Cumulative NMSE (%)",
+                    title="Legacy: summed per-block NMSE vs baseline", out_path=cum_fig_pct)
         payload["metric"]["cumulative_nmse_at_depth_d"] = "sum_{b=1..d} nmse_at_block_b (optional, can double-count propagation)"
         payload["cumulative_nmse_every_n"] = method_to_cum_at_depth
         payload["cumulative_nmse_percent_every_n"] = method_to_cum_at_depth_pct
@@ -566,7 +708,6 @@ def main() -> None:
 
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=True, indent=2)
-
     print(f"saved plot -> {nrmse_fig_path}")
     print(f"saved plot -> {abs_fig_path}")
     print(f"saved plot -> {cos_fig_path}")
@@ -578,6 +719,191 @@ def main() -> None:
         abs_m = method_to_abs_mse_at_depth[method][-1]
         cos_d = method_to_cosine_distance_at_depth[method][-1]
         print(f"  {method:20s}  NRMSE={nrmse_pct:.4f}%  abs_mse={abs_m:.6f}  cos_dist={cos_d:.6f}")
+
+
+def main_free(args) -> None:
+    """Free-running mode: same seed, no forced sampler, compare all scales.
+    Produces:
+      - heatmap: NRMSE % (scale × block)
+      - token disagreement bar per scale
+      - f_hat NRMSE per scale
+      - per-scale line plot: NRMSE vs block depth
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"device: {device}")
+    if device != "cuda":
+        print("warning: CUDA unavailable; this run will be slow.")
+    maybe_register_kmeans_codebook()
+    quant_v = args.quant_v
+    methods_list, methods = _register_per_level_configs(args.per_level_kmeans, quant_v)
+
+    vae, var = _build_model(device)
+
+    num_blocks = len(var.blocks)
+    num_stages = _num_ar_stages(var)
+    label_list = [int(x) for x in args.class_labels]
+    if not label_list:
+        raise ValueError("no class labels provided")
+    quant_mode = "KV" if quant_v else "K-only"
+    print(f"running labels={label_list}, seed={SEED}, quant_v={quant_v} ({quant_mode}), mode=free")
+
+    # ── accumulators per method ──
+    # heatmap: (num_stages, num_blocks) nrmse_pct sum
+    method_heatmap_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, num_blocks), dtype=np.float64) for m in methods}
+    # heatmap sum counts (in case of shape mismatches later, but currently 1 per label per method)
+    method_heatmap_count: Dict[str, int] = {m: 0 for m in methods}
+    # token disagreement per scale: (num_stages,) sum
+    method_tok_disagree_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
+    # f_hat NRMSE per scale: (num_stages,) sum
+    method_fhat_sum: Dict[str, np.ndarray] = {m: np.zeros(num_stages, dtype=np.float64) for m in methods}
+
+    for label in label_list:
+        label_B = torch.tensor([label], device=device)
+        print(f"[label={label}] collecting baseline free-running outputs...")
+        set_infer_seeds()
+        base_outs, base_tokens, base_fhat = collect_free_run_outputs(
+            var, label_B, device=device, method=None,
+        )
+
+        for method in methods:
+            print(f"[label={label}] collecting quant free-running method={method}...")
+            set_infer_seeds()  # reset to same seed for fair comparison
+            quant_outs, quant_tokens, quant_fhat = collect_free_run_outputs(
+                var, label_B, device=device, method=method, quant_v=quant_v,
+            )
+
+            # ── per-scale block NRMSE (heatmap) ──
+            for si in range(num_stages):
+                for bi in range(num_blocks):
+                    ref = base_outs[bi][si]
+                    cur = quant_outs[bi][si]
+                    if cur.shape != ref.shape:
+                        raise RuntimeError(
+                            f"scale {si} block {bi}: shape mismatch {tuple(cur.shape)} vs {tuple(ref.shape)}"
+                        )
+                    sse = float((cur - ref).pow(2).sum().item())
+                    ref_norm = float(ref.pow(2).sum().item())
+                    nmse = sse / max(ref_norm, 1e-12)
+                    nrmse_pct = 100.0 * math.sqrt(nmse)
+                    method_heatmap_sum[method][si, bi] += nrmse_pct
+            method_heatmap_count[method] += 1
+
+            # ── token disagreement per scale ──
+            for si in range(num_stages):
+                base_tok = base_tokens[si].flatten()
+                quant_tok = quant_tokens[si].flatten()
+                n_total = base_tok.numel()
+                n_same = (base_tok == quant_tok).sum().item()
+                disagree_rate = 1.0 - n_same / max(n_total, 1)
+                method_tok_disagree_sum[method][si] += disagree_rate
+
+            # ── f_hat NRMSE per scale ──
+            for si in range(num_stages):
+                bf = base_fhat[si]
+                qf = quant_fhat[si]
+                if bf is None or qf is None:
+                    fhat_nrmse = 0.0
+                else:
+                    sse = float((qf - bf).pow(2).sum().item())
+                    ref_norm = float(bf.pow(2).sum().item())
+                    fhat_nrmse = 100.0 * math.sqrt(sse / max(ref_norm, 1e-12))
+                method_fhat_sum[method][si] += fhat_nrmse
+
+    # ── average over labels ──
+    n_labels = float(len(label_list))
+    method_heatmap: Dict[str, np.ndarray] = {
+        m: method_heatmap_sum[m] / max(method_heatmap_count[m], 1) for m in methods
+    }
+    method_tok_disagree: Dict[str, List[float]] = {
+        m: (method_tok_disagree_sum[m] / n_labels).tolist() for m in methods
+    }
+    method_fhat_nrmse: Dict[str, List[float]] = {
+        m: (method_fhat_sum[m] / n_labels).tolist() for m in methods
+    }
+
+    # ── save outputs ──
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    prefix = f"{args.out_prefix}_" if args.out_prefix else ""
+    mode_suffix = "KV_free" if quant_v else "Konly_free"
+
+    # Heatmaps
+    for method in methods:
+        hm_path = OUT_DIR / f"{prefix}heatmap_nrmse_{method}_{mode_suffix}.png"
+        _plot_heatmap(
+            method_heatmap[method],
+            ylabel="Scale",
+            title=f"Free-running block NRMSE % ({method}, {quant_mode})",
+            out_path=hm_path,
+            num_stages=num_stages,
+            num_blocks=num_blocks,
+        )
+        print(f"saved heatmap -> {hm_path}")
+
+    # Per-scale line plots (one per method)
+    for method in methods:
+        per_scale_nrmse: Dict[int, List[float]] = {}
+        for si in range(num_stages):
+            per_scale_nrmse[si] = method_heatmap[method][si, :].tolist()
+        line_path = OUT_DIR / f"{prefix}perscale_nrmse_{method}_{mode_suffix}.png"
+        _plot_per_scale_lines(
+            per_scale_nrmse, num_blocks, line_path,
+            method_label=method, quant_mode=quant_mode,
+        )
+        print(f"saved per-scale lines -> {line_path}")
+
+    # Token disagreement
+    tok_path = OUT_DIR / f"{prefix}token_disagree_{mode_suffix}.png"
+    _plot_token_disagree(method_tok_disagree, num_stages, tok_path, quant_mode=quant_mode)
+    print(f"saved token disagreement -> {tok_path}")
+
+    # f_hat NRMSE
+    fhat_path = OUT_DIR / f"{prefix}fhat_nrmse_{mode_suffix}.png"
+    _plot_fhat_nrmse(method_fhat_nrmse, num_stages, fhat_path, quant_mode=quant_mode)
+    print(f"saved f_hat NRMSE -> {fhat_path}")
+
+    # JSON
+    json_path = OUT_DIR / f"{prefix}free_running_metrics_{mode_suffix}.json"
+    payload = {
+        "model_depth": MODEL_DEPTH, "seed": SEED, "cfg": CFG, "top_k": TOP_K, "top_p": TOP_P,
+        "mode": "free", "quant_v": quant_v, "quant_mode": quant_mode,
+        "class_labels": label_list, "num_class_labels": len(label_list),
+        "num_ar_stages": num_stages,
+        "num_blocks": num_blocks,
+        "metric_descriptions": {
+            "heatmap_nrmse": "per-scale per-block NRMSE (%), rows=scales, cols=blocks",
+            "token_disagree_per_scale": "fraction of tokens that differ from baseline at each scale",
+            "fhat_nrmse_per_scale": "NRMSE (%) of the accumulated f_hat latent map after each scale",
+        },
+        "heatmap_nrmse": {m: method_heatmap[m].tolist() for m in methods},
+        "token_disagree_per_scale": method_tok_disagree,
+        "fhat_nrmse_per_scale": method_fhat_nrmse,
+    }
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=True, indent=2)
+    print(f"saved data -> {json_path}")
+
+    # Summary to console
+    print(f"\nToken disagreement per scale ({quant_mode}, free-running):")
+    header = f"{'scale':>6s}  {'tokens':>6s}  " + "  ".join(f"{m:>20s}" for m in methods)
+    print(header)
+    patch_nums = (1, 2, 3, 4, 5, 6, 8, 10, 13, 16)
+    for si in range(num_stages):
+        n_tokens = patch_nums[si] ** 2
+        vals = "  ".join(f"{method_tok_disagree[m][si]*100:>19.2f}%" for m in methods)
+        print(f"  {si:>4d}  {n_tokens:>6d}  {vals}")
+
+    print(f"\nf_hat NRMSE per scale ({quant_mode}, free-running):")
+    header = f"{'scale':>6s}  " + "  ".join(f"{m:>20s}" for m in methods)
+    print(header)
+    for si in range(num_stages):
+        vals = "  ".join(f"{method_fhat_nrmse[m][si]:>19.4f}%" for m in methods)
+        print(f"  {si:>4d}  {vals}")
+
+    print(f"\nPer-scale block NRMSE summary ({quant_mode}, free-running):")
+    for method in methods:
+        hm = method_heatmap[method]
+        print(f"  {method:20s}  mean={hm.mean():.4f}%  max={hm.max():.4f}%  "
+              f"last_scale_mean={hm[-1,:].mean():.4f}%")
 
 
 if __name__ == "__main__":
