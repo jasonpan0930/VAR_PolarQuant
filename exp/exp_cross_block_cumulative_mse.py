@@ -71,7 +71,7 @@ from models import build_vae_var
 from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v, register_per_level_codebook
 from utils.theta2_kmeans import load_theta2_codebook
 
-OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse"
+OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse" / "quant_K_only"
 THETA2_KMEANS_CODEBOOK = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30" / "codebook.json"
 THETA2_KMEANS_CODEBOOK_V = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30_v" / "codebook.json"
 MODEL_DEPTH = 30

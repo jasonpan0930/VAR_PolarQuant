@@ -1,0 +1,118 @@
+depth=30 K+V per-level k=(16 16 16 16 16) classes=[22 45 123 437 701] refit=1 out_dir=/home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16
+device: cuda
+model_depth=30 target_blocks=(7, 15, 22, 29) class_labels=(22, 45, 123, 437, 701)
+
+[constructor]  ==== flash_if_available=True (0/30), fused_if_available=True (fusing_add_ln=0/30, fusing_mlp=0/30) ==== 
+    [VAR config ] embed_dim=1920, num_heads=30, depth=30, mlp_ratio=4.0
+    [drop ratios ] drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.125 (tensor([0.0000, 0.0043, 0.0086, 0.0129, 0.0172, 0.0216, 0.0259, 0.0302, 0.0345,
+        0.0388, 0.0431, 0.0474, 0.0517, 0.0560, 0.0603, 0.0647, 0.0690, 0.0733,
+        0.0776, 0.0819, 0.0862, 0.0905, 0.0948, 0.0991, 0.1034, 0.1078, 0.1121,
+        0.1164, 0.1207, 0.1250]))
+
+[init_weights] VAR with init_std=0.0131762
+device: cuda
+per-level K-means: depth=30, K+V simultaneously, k=(16, 16, 16, 16, 16)
+target_blocks=(7, 15, 22, 29) class_labels=(22, 45, 123, 437, 701)
+collecting per-level FP θ₂ for K+V under FP16
+  class 22 g_seed=22 ...
+    K T1: 1,305,600 θ₂, sum_w=98.120248
+    K T2: 652,800 θ₂, sum_w=49.060124
+    K T3: 326,400 θ₂, sum_w=24.530062
+    K T4: 163,200 θ₂, sum_w=12.265031
+    K T5: 81,600 θ₂, sum_w=6.132516
+    V T1: 1,305,600 θ₂, sum_w=3117.575331
+    V T2: 652,800 θ₂, sum_w=1558.787665
+    V T3: 326,400 θ₂, sum_w=779.393833
+    V T4: 163,200 θ₂, sum_w=389.696916
+    V T5: 81,600 θ₂, sum_w=194.848458
+  class 45 g_seed=45 ...
+    K T1: 1,305,600 θ₂, sum_w=98.233180
+    K T2: 652,800 θ₂, sum_w=49.116590
+    K T3: 326,400 θ₂, sum_w=24.558295
+    K T4: 163,200 θ₂, sum_w=12.279148
+    K T5: 81,600 θ₂, sum_w=6.139574
+    V T1: 1,305,600 θ₂, sum_w=3025.066310
+    V T2: 652,800 θ₂, sum_w=1512.533155
+    V T3: 326,400 θ₂, sum_w=756.266578
+    V T4: 163,200 θ₂, sum_w=378.133289
+    V T5: 81,600 θ₂, sum_w=189.066644
+  class 123 g_seed=123 ...
+    K T1: 1,305,600 θ₂, sum_w=98.340414
+    K T2: 652,800 θ₂, sum_w=49.170207
+    K T3: 326,400 θ₂, sum_w=24.585103
+    K T4: 163,200 θ₂, sum_w=12.292552
+    K T5: 81,600 θ₂, sum_w=6.146276
+    V T1: 1,305,600 θ₂, sum_w=3321.430546
+    V T2: 652,800 θ₂, sum_w=1660.715273
+    V T3: 326,400 θ₂, sum_w=830.357636
+    V T4: 163,200 θ₂, sum_w=415.178818
+    V T5: 81,600 θ₂, sum_w=207.589409
+  class 437 g_seed=437 ...
+    K T1: 1,305,600 θ₂, sum_w=98.091569
+    K T2: 652,800 θ₂, sum_w=49.045784
+    K T3: 326,400 θ₂, sum_w=24.522892
+    K T4: 163,200 θ₂, sum_w=12.261446
+    K T5: 81,600 θ₂, sum_w=6.130723
+    V T1: 1,305,600 θ₂, sum_w=3201.321354
+    V T2: 652,800 θ₂, sum_w=1600.660677
+    V T3: 326,400 θ₂, sum_w=800.330338
+    V T4: 163,200 θ₂, sum_w=400.165169
+    V T5: 81,600 θ₂, sum_w=200.082585
+  class 701 g_seed=701 ...
+    K T1: 1,305,600 θ₂, sum_w=98.036461
+    K T2: 652,800 θ₂, sum_w=49.018231
+    K T3: 326,400 θ₂, sum_w=24.509115
+    K T4: 163,200 θ₂, sum_w=12.254558
+    K T5: 81,600 θ₂, sum_w=6.127279
+    V T1: 1,305,600 θ₂, sum_w=3152.552580
+    V T2: 652,800 θ₂, sum_w=1576.276290
+    V T3: 326,400 θ₂, sum_w=788.138145
+    V T4: 163,200 θ₂, sum_w=394.069072
+    V T5: 81,600 θ₂, sum_w=197.034536
+
+--- fitting per-level codebooks for K ---
+  K T1: 6,528,000 samples, weight_sum=490.821872, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_T1/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=6.798862e-04
+    K T1 centroids: 0.112082, 0.225388, 0.324020, 0.415452, 0.502478, 0.586449, 0.668110, 0.747869, 0.826773, 0.906289, 0.987833, 1.071808, 1.158335, 1.249174, 1.347062, 1.459844
+  K T2: 3,264,000 samples, weight_sum=245.410936, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_T2/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=4.598376e-04
+    K T2 centroids: 0.213990, 0.327566, 0.415713, 0.492660, 0.562411, 0.626209, 0.688457, 0.749460, 0.809352, 0.871299, 0.933851, 0.999478, 1.071457, 1.150612, 1.241152, 1.357925
+  K T3: 1,632,000 samples, weight_sum=122.705468, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_T3/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=2.734146e-04
+    K T3 centroids: 0.333081, 0.435072, 0.510504, 0.574830, 0.628659, 0.678846, 0.725328, 0.771221, 0.814980, 0.860507, 0.905742, 0.955748, 1.008191, 1.070309, 1.143557, 1.240709
+  K T4: 816,000 samples, weight_sum=61.352734, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_T4/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=1.550793e-04
+    K T4 centroids: 0.426956, 0.511798, 0.572692, 0.616603, 0.657753, 0.693566, 0.728632, 0.762751, 0.794386, 0.828170, 0.863438, 0.898430, 0.939535, 0.985284, 1.043441, 1.119531
+  K T5: 408,000 samples, weight_sum=30.676367, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_T5/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=8.058609e-05
+    K T5 centroids: 0.525438, 0.597647, 0.642700, 0.676615, 0.702582, 0.728968, 0.754446, 0.777515, 0.798302, 0.821394, 0.846823, 0.872643, 0.898075, 0.931703, 0.973980, 1.033838
+
+--- fitting per-level codebooks for V ---
+  V T1: 6,528,000 samples, weight_sum=15817.946120, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_v_T1/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=6.811943e-04
+    V T1 centroids: 0.112286, 0.225721, 0.324540, 0.416213, 0.503633, 0.588508, 0.670548, 0.750697, 0.830036, 0.910075, 0.991888, 1.075769, 1.161991, 1.252261, 1.349338, 1.460468
+  V T2: 3,264,000 samples, weight_sum=7908.973060, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_v_T2/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=4.626373e-04
+    V T2 centroids: 0.213360, 0.327444, 0.416091, 0.493775, 0.564191, 0.628980, 0.692321, 0.754213, 0.815090, 0.877767, 0.941190, 1.006596, 1.077674, 1.155714, 1.244515, 1.356992
+  V T3: 1,632,000 samples, weight_sum=3954.486530, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_v_T3/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=2.840166e-04
+    V T3 centroids: 0.321573, 0.426154, 0.502305, 0.566712, 0.621004, 0.672886, 0.720162, 0.767132, 0.811429, 0.857893, 0.904455, 0.955458, 1.009048, 1.072477, 1.148617, 1.251892
+  V T4: 816,000 samples, weight_sum=1977.243265, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_v_T4/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=1.625927e-04
+    V T4 centroids: 0.440439, 0.521712, 0.583832, 0.632124, 0.675012, 0.711063, 0.747305, 0.781404, 0.813840, 0.848588, 0.883457, 0.920763, 0.963641, 1.009567, 1.071224, 1.159601
+  V T5: 408,000 samples, weight_sum=988.621633, fitting k=16 ...
+    saved -> /home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_16_16/theta2_kmeans_d30_v_T5/codebook.json
+    backend=numpy_lloyd weighted_angle_mse=9.717543e-05
+    V T5 centroids: 0.487292, 0.569919, 0.615872, 0.656423, 0.687817, 0.716065, 0.744118, 0.769676, 0.792123, 0.816997, 0.844640, 0.872804, 0.899992, 0.935555, 0.978881, 1.043579
+
+per-level codebooks done (K+V)
+done (per-level)

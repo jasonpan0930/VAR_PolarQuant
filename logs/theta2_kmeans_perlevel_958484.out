@@ -1,0 +1,62 @@
+depth=30 K+V per-level k=(16 16 16 8 8) classes=[22 45 123 437 701] refit=1 out_dir=/home/jasonpan0930/var_research/VAR_polarQuant/polar_quant_dumps/theta2_kmeans_save/16_16_16_8_8
+device: cuda
+model_depth=30 target_blocks=(7, 15, 22, 29) class_labels=(22, 45, 123, 437, 701)
+
+[constructor]  ==== flash_if_available=True (0/30), fused_if_available=True (fusing_add_ln=0/30, fusing_mlp=0/30) ==== 
+    [VAR config ] embed_dim=1920, num_heads=30, depth=30, mlp_ratio=4.0
+    [drop ratios ] drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.125 (tensor([0.0000, 0.0043, 0.0086, 0.0129, 0.0172, 0.0216, 0.0259, 0.0302, 0.0345,
+        0.0388, 0.0431, 0.0474, 0.0517, 0.0560, 0.0603, 0.0647, 0.0690, 0.0733,
+        0.0776, 0.0819, 0.0862, 0.0905, 0.0948, 0.0991, 0.1034, 0.1078, 0.1121,
+        0.1164, 0.1207, 0.1250]))
+
+[init_weights] VAR with init_std=0.0131762
+device: cuda
+per-level K-means: depth=30, K+V simultaneously, k=(16, 16, 16, 8, 8)
+target_blocks=(7, 15, 22, 29) class_labels=(22, 45, 123, 437, 701)
+collecting per-level FP θ₂ for K+V under FP16
+  class 22 g_seed=22 ...
+    K T1: 1,305,600 θ₂, sum_w=98.120248
+    K T2: 652,800 θ₂, sum_w=49.060124
+    K T3: 326,400 θ₂, sum_w=24.530062
+    K T4: 163,200 θ₂, sum_w=12.265031
+    K T5: 81,600 θ₂, sum_w=6.132516
+    V T1: 1,305,600 θ₂, sum_w=3117.575331
+    V T2: 652,800 θ₂, sum_w=1558.787665
+    V T3: 326,400 θ₂, sum_w=779.393833
+    V T4: 163,200 θ₂, sum_w=389.696916
+    V T5: 81,600 θ₂, sum_w=194.848458
+  class 45 g_seed=45 ...
+    K T1: 1,305,600 θ₂, sum_w=98.233180
+    K T2: 652,800 θ₂, sum_w=49.116590
+    K T3: 326,400 θ₂, sum_w=24.558295
+    K T4: 163,200 θ₂, sum_w=12.279148
+    K T5: 81,600 θ₂, sum_w=6.139574
+    V T1: 1,305,600 θ₂, sum_w=3025.066310
+    V T2: 652,800 θ₂, sum_w=1512.533155
+    V T3: 326,400 θ₂, sum_w=756.266578
+    V T4: 163,200 θ₂, sum_w=378.133289
+    V T5: 81,600 θ₂, sum_w=189.066644
+  class 123 g_seed=123 ...
+    K T1: 1,305,600 θ₂, sum_w=98.340414
+    K T2: 652,800 θ₂, sum_w=49.170207
+    K T3: 326,400 θ₂, sum_w=24.585103
+    K T4: 163,200 θ₂, sum_w=12.292552
+    K T5: 81,600 θ₂, sum_w=6.146276
+    V T1: 1,305,600 θ₂, sum_w=3321.430546
+    V T2: 652,800 θ₂, sum_w=1660.715273
+    V T3: 326,400 θ₂, sum_w=830.357636
+    V T4: 163,200 θ₂, sum_w=415.178818
+    V T5: 81,600 θ₂, sum_w=207.589409
+  class 437 g_seed=437 ...
+    K T1: 1,305,600 θ₂, sum_w=98.091569
+    K T2: 652,800 θ₂, sum_w=49.045784
+    K T3: 326,400 θ₂, sum_w=24.522892
+    K T4: 163,200 θ₂, sum_w=12.261446
+    K T5: 81,600 θ₂, sum_w=6.130723
+    V T1: 1,305,600 θ₂, sum_w=3201.321354
+    V T2: 652,800 θ₂, sum_w=1600.660677
+    V T3: 326,400 θ₂, sum_w=800.330338
+    V T4: 163,200 θ₂, sum_w=400.165169
+    V T5: 81,600 θ₂, sum_w=200.082585
+  class 701 g_seed=701 ...
+slurmstepd: error: *** JOB 958484 ON gn1221 CANCELLED AT 2026-06-19T21:14:22 ***

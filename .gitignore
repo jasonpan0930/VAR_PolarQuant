@@ -8,8 +8,6 @@ llava/
 _vis_cached/
 _auto_*
 ckpt/
-log/
-logs/
 tb*/
 img*/
 local_output*

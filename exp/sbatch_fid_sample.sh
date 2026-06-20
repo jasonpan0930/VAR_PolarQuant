@@ -13,7 +13,7 @@
 # Adjust -A, -p, paths, and array size to match your account.
 
 #SBATCH -A MST112145
-#SBATCH -p normal
+#SBATCH -p gp2d
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
