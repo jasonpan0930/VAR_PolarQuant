@@ -11,8 +11,6 @@ ckpt/
 tb*/
 img*/
 local_output*
-# polar quant experiment outputs (large)
-polar_quant_dumps/
 fc2_records/
 kv_records/
 fid_samples
