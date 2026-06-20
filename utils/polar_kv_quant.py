@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from utils.angle_quant import DEFAULT_CONFIG, PolarQuantConfig, NUM_TREE_LEVELS
+from utils.cordic import cordic_vectoring
 
 HEAD_DIM = 64
 NUM_Q1 = 32
@@ -45,8 +46,7 @@ def encode_polar_k64(
 
     # Stage 1: pairwise polar decomposition
     x0, x1 = k[..., 0::2], k[..., 1::2]
-    y = torch.sqrt(x0 * x0 + x1 * x1 + 1e-12)
-    theta1 = torch.atan2(x1, x0)
+    y, theta1 = cordic_vectoring(x0, x1, config.cordic_iters)
     q1 = config.theta1.quantize(theta1)
 
     # Stage 2: merge tree (5 layers: 32->16->8->4->2->1)
@@ -54,8 +54,7 @@ def encode_polar_k64(
     q2_parts = []
     for li in range(NUM_TREE_LEVELS):
         a, b = nodes[..., 0::2], nodes[..., 1::2]
-        nodes = torch.sqrt(a * a + b * b + 1e-12)
-        theta2 = torch.atan2(b, a)
+        nodes, theta2 = cordic_vectoring(a, b, config.cordic_iters)
         q2_parts.append(config.theta2_per_level[li].quantize(theta2))
 
     q2 = torch.cat(q2_parts, dim=-1)          # (..., 31)
@@ -131,16 +130,14 @@ def reconstruct_k_from_y_theta1(y: torch.Tensor, theta1: torch.Tensor) -> torch.
 def _encode_core(k: torch.Tensor, config: PolarQuantConfig):
     """Encode + return theta1/theta2 before quantization (for analysis)."""
     x0, x1 = k[..., 0::2], k[..., 1::2]
-    y = torch.sqrt(x0 * x0 + x1 * x1 + 1e-12)
-    theta1 = torch.atan2(x1, x0)
+    y, theta1 = cordic_vectoring(x0, x1, config.cordic_iters)
     q1 = config.theta1.quantize(theta1)
 
     nodes = y
     q2_parts, theta2_parts = [], []
     for li in range(NUM_TREE_LEVELS):
         a, b = nodes[..., 0::2], nodes[..., 1::2]
-        nodes = torch.sqrt(a * a + b * b + 1e-12)
-        theta2 = torch.atan2(b, a)
+        nodes, theta2 = cordic_vectoring(a, b, config.cordic_iters)
         q2_parts.append(config.theta2_per_level[li].quantize(theta2))
         theta2_parts.append(theta2)
 

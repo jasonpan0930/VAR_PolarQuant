@@ -145,6 +145,7 @@ class PolarQuantConfig:
     label: str
     theta1: AngleQuantScheme
     _theta2: Union[AngleQuantScheme, Tuple[AngleQuantScheme, ...]]
+    cordic_iters: int = 12
 
     def __post_init__(self):
         """Normalize theta2 to 5-tuple (one per tree level T1…T5)."""
