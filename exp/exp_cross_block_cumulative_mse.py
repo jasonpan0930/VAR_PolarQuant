@@ -17,6 +17,8 @@ Free-running mode outputs:
   .../<prefix>heatmap_cos_{method}_{mode_suffix}.png           (scale × block cosine distance)
   .../<prefix>perscale_nrmse_{method}_{mode_suffix}.png        (per-scale line plot)
   .../<prefix>perscale_cos_{method}_{mode_suffix}.png          (per-scale cosine distance)
+  .../<prefix>heatmap_macro_nrmse_{method}_...png              (macro-averaged per-dim NRMSE heatmap)
+  .../<prefix>perscale_macro_nrmse_{method}_...png             (macro NRMSE per-scale line plot)
   .../<prefix>token_disagree_{mode_suffix}.png                 (token disagree bar)
   .../<prefix>fhat_nrmse_{mode_suffix}.png                     (f_hat NRMSE per scale)
   .../<prefix>fhat_cos_{mode_suffix}.png                       (f_hat cosine distance per scale)
@@ -78,8 +80,8 @@ CLASS_LABELS = (22, 45, 123, 437, 701)
 SEED, CFG, TOP_K, TOP_P = 0, 4, 900, 0.95
 METHODS = (
     "uniform_int4",
-    "e2m1_fp4",
-    "fp6_e3m2",
+    # "e2m1_fp4",
+    # "fp6_e3m2",
     "fp6_e2m3",
     "int6_kmeans_int4",
 )
@@ -118,6 +120,20 @@ class BlockErrorAccumulator:
             return 0.0
         cos_sim = max(-1.0, min(1.0, self.dot / denom))
         return 1.0 - cos_sim
+
+
+def _macro_nrmse_pct(ref: torch.Tensor, cur: torch.Tensor, eps_frac: float = 0.01) -> float:
+    """Per-element macro-averaged NRMSE (%): each dim weighted equally.
+    Only elements with ref² > eps_frac * max(ref²) count (avoids division by near-zero)."""
+    ref2 = (ref * ref).float()
+    threshold = float(ref2.max().item()) * eps_frac
+    mask = ref2 > threshold
+    n = mask.sum().item()
+    if n < 2:
+        return 0.0
+    se_per_elem = ((cur.float() - ref.float()).pow(2)[mask] / ref2[mask].clamp(min=1e-12)).sum().item()
+    nmse_macro = se_per_elem / n
+    return 100.0 * math.sqrt(max(nmse_macro, 0.0))
 
 
 def set_infer_seeds() -> None:
@@ -304,6 +320,7 @@ def compute_method_block_metrics(
         # (num_stages, num_blocks) accumulators
         accum_nmse = np.zeros((num_stages, num_blocks), dtype=np.float64)
         accum_cos = np.zeros((num_stages, num_blocks), dtype=np.float64)
+        accum_macro = np.zeros((num_stages, num_blocks), dtype=np.float64)
     else:
         accum = [BlockErrorAccumulator() for _ in range(num_blocks)]
     call_idx = [0 for _ in range(num_blocks)]
@@ -331,6 +348,8 @@ def compute_method_block_metrics(
                 denom = math.sqrt(max(ref_norm, 0.0) * max(cur_norm, 0.0))
                 cos_sim = max(-1.0, min(1.0, dot / max(denom, 1e-12)))
                 accum_cos[j, block_idx] = 1.0 - cos_sim
+                # macro-averaged NRMSE
+                accum_macro[j, block_idx] = _macro_nrmse_pct(ref, cur)
             else:
                 if j == num_stages - 1:
                     accum[block_idx].add(ref, cur)
@@ -353,7 +372,7 @@ def compute_method_block_metrics(
             raise RuntimeError(f"block {i}: baseline has {len(baseline_outputs[i])} stages, expected {num_stages}")
 
     if all_scales:
-        return accum_nmse, accum_cos
+        return accum_nmse, accum_cos, accum_macro
     else:
         nmse = np.array([a.nmse() for a in accum], dtype=np.float64)
         abs_mse = np.array([a.abs_mse() for a in accum], dtype=np.float64)
@@ -646,6 +665,7 @@ def main_forced(args) -> None:
     # ── per-scale accumulators (all 10 scales) ──
     method_ps_nrmse_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
     method_ps_cos_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
+    method_ps_macro_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
     method_ps_count: Dict[str, int] = {m: 0 for m in methods}
 
     for label in label_list:
@@ -676,7 +696,7 @@ def main_forced(args) -> None:
 
             # ── per-scale block NRMSE & cosine (all 10 scales) ──
             set_infer_seeds()
-            ps_nrmse, ps_cos = compute_method_block_metrics(
+            ps_nrmse, ps_cos, ps_macro = compute_method_block_metrics(
                 var, label_B, device=device, method=method,
                 baseline_outputs=baseline_outputs,
                 forced_stage_indices=baseline_stage_indices,
@@ -685,6 +705,7 @@ def main_forced(args) -> None:
             )
             method_ps_nrmse_sum[method] += ps_nrmse
             method_ps_cos_sum[method] += ps_cos
+            method_ps_macro_sum[method] += ps_macro
             method_ps_count[method] += 1
 
     n_labels = float(len(label_list))
@@ -699,6 +720,7 @@ def main_forced(args) -> None:
     # ── per-scale averages ──
     method_ps_nrmse: Dict[str, np.ndarray] = {m: method_ps_nrmse_sum[m] / max(method_ps_count[m], 1) for m in methods}
     method_ps_cos: Dict[str, np.ndarray] = {m: method_ps_cos_sum[m] / max(method_ps_count[m], 1) for m in methods}
+    method_ps_macro: Dict[str, np.ndarray] = {m: method_ps_macro_sum[m] / max(method_ps_count[m], 1) for m in methods}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.out_prefix}_" if args.out_prefix else ""
@@ -772,6 +794,32 @@ def main_forced(args) -> None:
         )
         print(f"saved forced per-scale cosine lines -> {line_path}")
 
+    # ── per-scale macro NRMSE heatmaps (forced token path, one per method) ──
+    for method in methods:
+        macro_hm_path = OUT_DIR / f"{prefix}heatmap_macro_nrmse_{method}_{mode_suffix}_forced.png"
+        _plot_heatmap(
+            method_ps_macro[method],
+            ylabel="Scale",
+            title=f"Per-scale block macro NRMSE % ({method}, {quant_mode}, forced)",
+            out_path=macro_hm_path,
+            num_stages=num_stages,
+            num_blocks=depth,
+            cbar_label="macro NRMSE (%)",
+        )
+        print(f"saved forced per-scale macro NRMSE heatmap -> {macro_hm_path}")
+
+    # ── per-scale macro NRMSE line plots (forced, one per method) ──
+    for method in methods:
+        ps_line: Dict[int, List[float]] = {}
+        for si in range(num_stages):
+            ps_line[si] = method_ps_macro[method][si, :].tolist()
+        line_path = OUT_DIR / f"{prefix}perscale_macro_nrmse_{method}_{mode_suffix}_forced.png"
+        _plot_per_scale_lines(
+            ps_line, depth, line_path,
+            method_label=method, ylabel="macro NRMSE (%)", quant_mode=f"{quant_mode}, forced",
+        )
+        print(f"saved forced per-scale macro NRMSE lines -> {line_path}")
+
     json_path = OUT_DIR / f"{prefix}block_error_at_depth_{mode_suffix}_every4.json"
     payload = {
         "model_depth": MODEL_DEPTH, "seed": SEED, "cfg": CFG, "top_k": TOP_K, "top_p": TOP_P,
@@ -797,6 +845,7 @@ def main_forced(args) -> None:
         "cosine_distance_at_depth_every_n": method_to_cosine_distance_at_depth,
         "per_scale_nrmse_forced": {m: method_ps_nrmse[m].tolist() for m in methods},
         "per_scale_cos_forced": {m: method_ps_cos[m].tolist() for m in methods},
+        "per_scale_macro_nrmse_forced": {m: method_ps_macro[m].tolist() for m in methods},
     }
     if args.cumulative:
         method_to_cum_at_depth: Dict[str, List[float]] = {m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in methods}
@@ -838,6 +887,12 @@ def main_forced(args) -> None:
         print(f"  {method:20s}  mean={chm.mean():.6f}  max={chm.max():.6f}  "
               f"last_scale_mean={chm[-1,:].mean():.6f}")
 
+    print(f"\nPer-scale block macro NRMSE summary ({quant_mode}, forced token path):")
+    for method in methods:
+        mhm = method_ps_macro[method]
+        print(f"  {method:20s}  mean={mhm.mean():.4f}%  max={mhm.max():.4f}%  "
+              f"last_scale_mean={mhm[-1,:].mean():.4f}%")
+
 
 def main_free(args) -> None:
     """Free-running mode: same seed, no forced sampler, compare all scales.
@@ -870,6 +925,8 @@ def main_free(args) -> None:
     method_heatmap_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, num_blocks), dtype=np.float64) for m in methods}
     # Cosine distance heatmap: (num_stages, num_blocks) cosine distance sum
     method_cos_heatmap_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, num_blocks), dtype=np.float64) for m in methods}
+    # Macro-averaged NRMSE heatmap: (num_stages, num_blocks)
+    method_macro_heatmap_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, num_blocks), dtype=np.float64) for m in methods}
     # heatmap sum counts
     method_heatmap_count: Dict[str, int] = {m: 0 for m in methods}
     # token disagreement per scale: (num_stages,) sum
@@ -922,6 +979,8 @@ def main_free(args) -> None:
                     denom = math.sqrt(max(ref_norm, 0.0) * max(cur_norm, 0.0))
                     cos_sim = max(-1.0, min(1.0, dot / max(denom, 1e-12)))
                     method_cos_heatmap_sum[method][si, bi] += (1.0 - cos_sim)
+                    # macro-averaged NRMSE
+                    method_macro_heatmap_sum[method][si, bi] += _macro_nrmse_pct(ref, cur)
             method_heatmap_count[method] += 1
 
             # ── token disagreement per scale ──
@@ -996,6 +1055,9 @@ def main_free(args) -> None:
     }
     method_cos_heatmap: Dict[str, np.ndarray] = {
         m: method_cos_heatmap_sum[m] / max(method_heatmap_count[m], 1) for m in methods
+    }
+    method_macro_heatmap: Dict[str, np.ndarray] = {
+        m: method_macro_heatmap_sum[m] / max(method_heatmap_count[m], 1) for m in methods
     }
     method_tok_disagree: Dict[str, List[float]] = {
         m: (method_tok_disagree_sum[m] / n_labels).tolist() for m in methods
@@ -1078,7 +1140,33 @@ def main_free(args) -> None:
         )
         print(f"saved per-scale cosine lines -> {line_path}")
 
-    # Token disagreement
+    # Macro-averaged NRMSE heatmaps (free mode)
+    for method in methods:
+        macro_hm_path = OUT_DIR / f"{prefix}heatmap_macro_nrmse_{method}_{mode_suffix}.png"
+        _plot_heatmap(
+            method_macro_heatmap[method],
+            ylabel="Scale",
+            title=f"Free-running block macro NRMSE % ({method}, {quant_mode})",
+            out_path=macro_hm_path,
+            num_stages=num_stages,
+            num_blocks=num_blocks,
+            cbar_label="macro NRMSE (%)",
+        )
+        print(f"saved macro NRMSE heatmap -> {macro_hm_path}")
+
+    # Macro-averaged NRMSE per-scale line plots (free mode, one per method)
+    for method in methods:
+        per_scale_macro: Dict[int, List[float]] = {}
+        for si in range(num_stages):
+            per_scale_macro[si] = method_macro_heatmap[method][si, :].tolist()
+        line_path = OUT_DIR / f"{prefix}perscale_macro_nrmse_{method}_{mode_suffix}.png"
+        _plot_per_scale_lines(
+            per_scale_macro, num_blocks, line_path,
+            method_label=method, ylabel="macro NRMSE (%)", quant_mode=quant_mode,
+        )
+        print(f"saved per-scale macro NRMSE lines -> {line_path}")
+
+    # Token disagreement (free mode)
     tok_path = OUT_DIR / f"{prefix}token_disagree_{mode_suffix}.png"
     _plot_token_disagree(method_tok_disagree, num_stages, tok_path, quant_mode=quant_mode)
     print(f"saved token disagreement -> {tok_path}")
@@ -1159,6 +1247,7 @@ def main_free(args) -> None:
         "metric_descriptions": {
             "heatmap_nrmse": "per-scale per-block NRMSE (%), rows=scales, cols=blocks",
             "heatmap_cosine_distance": "per-scale per-block cosine distance (1 - cos_sim), rows=scales, cols=blocks",
+            "heatmap_macro_nrmse": "per-scale per-block macro-averaged NRMSE (%), equal weight per dim, energy threshold >1%",
             "token_disagree_per_scale": "fraction of tokens that differ from baseline at each scale",
             "fhat_nrmse_per_scale": "NRMSE (%) of the accumulated f_hat latent map after each scale",
             "fhat_cosine_distance_per_scale": "cosine distance of f_hat latent map at each scale",
@@ -1174,6 +1263,7 @@ def main_free(args) -> None:
         "fhat_cosine_distance_per_scale": method_fhat_cos,
         "fhat_spatial_cos_per_scale": {m: method_fhat_spatial[m].tolist() for m in methods},
         "fhat_spatial_cos_mean_per_scale": method_fhat_spatial_mean_per_scale,
+        "heatmap_macro_nrmse": {m: method_macro_heatmap[m].tolist() for m in methods},
         "decoded_psnr_scale9": method_decoded_psnr,
         "decoded_nrmse_percent_scale9": method_decoded_nrmse,
     }
@@ -1216,6 +1306,12 @@ def main_free(args) -> None:
         chm = method_cos_heatmap[method]
         print(f"  {method:20s}  mean={chm.mean():.6f}  max={chm.max():.6f}  "
               f"last_scale_mean={chm[-1,:].mean():.6f}")
+
+    print(f"\nPer-scale block macro NRMSE summary ({quant_mode}, free-running):")
+    for method in methods:
+        mhm = method_macro_heatmap[method]
+        print(f"  {method:20s}  mean={mhm.mean():.4f}%  max={mhm.max():.4f}%  "
+              f"last_scale_mean={mhm[-1,:].mean():.4f}%")
 
     print(f"\nf_hat per-spatial-position cos distance mean per scale ({quant_mode}, free-running):")
     header = f"{'scale':>6s}  " + "  ".join(f"{m:>20s}" for m in methods)
