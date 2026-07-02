@@ -17,7 +17,7 @@ class PolarKVDumpSession:
     Attach via var._polar_dump = session.
     """
 
-    def __init__(self, out_dir: str = 'polar_quant_dumps', batch_index: int = 0):
+    def __init__(self, out_dir: str = 'artifacts/polar_kv_dumps', batch_index: int = 0):
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.batch_index = batch_index

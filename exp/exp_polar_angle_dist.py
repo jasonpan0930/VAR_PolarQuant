@@ -5,13 +5,13 @@ plus VAR sample images (original fp16 K cache + one per polar config).
   cd VAR_polarQuant && python exp/exp_polar_angle_dist.py
 
 Requires a pre-fitted K-means θ₂ codebook (does not re-run K-means here):
-  polar_quant_dumps/theta2_kmeans/codebook.json
+  configs/codebooks/theta2_kmeans/codebook.json
   (create via exp/exp_theta2_kmeans.py)
 
 Outputs:
-  polar_quant_dumps/angle_plots/sample_original.png
-  polar_quant_dumps/angle_plots/<config>/k_error_global.png   (one inference pass each)
-  polar_quant_dumps/angle_plots/<config>/sample_var.png
+  artifacts/angle_plots/sample_original.png
+  artifacts/angle_plots/<config>/k_error_global.png   (one inference pass each)
+  artifacts/angle_plots/<config>/sample_var.png
 """
 import os
 import random
@@ -33,8 +33,8 @@ from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebo
 from utils.polar_angle_viz import PolarAngleStatsSession, render_all_plots
 from utils.theta2_kmeans import load_theta2_codebook
 
-OUT_BASE = ROOT / 'polar_quant_dumps' / 'angle_plots'
-THETA2_KMEANS_CODEBOOK = ROOT / 'polar_quant_dumps' / 'theta2_kmeans' / 'codebook.json'
+OUT_BASE = ROOT / 'artifacts' / 'angle_plots'
+THETA2_KMEANS_CODEBOOK = ROOT / 'configs' / 'codebooks' / 'theta2_kmeans' / 'codebook.json'
 MODEL_DEPTH = 30
 BATCH_SIZE = 1
 CLASS_LABELS = (22, )

@@ -129,7 +129,7 @@ python exp/exp_theta2_kmeans.py --model-depth 30 --refit
 
 # Per-level codebooks (T1-T5, K+V in one pass)
 python exp/exp_theta2_kmeans.py --model-depth 30 --per-level \
-    --per-level-k 16 16 16 16 16 --out-dir polar_quant_dumps/
+    --per-level-k 16 16 16 16 16
 ```
 
 ### 2. Cross-block Cumulative Error Analysis

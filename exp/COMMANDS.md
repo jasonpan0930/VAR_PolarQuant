@@ -68,20 +68,20 @@ cd /home/jasonpan0930/var_research/VAR_polarQuant
 /home/jasonpan0930/.conda/envs/var_env/bin/python exp/exp_theta2_kmeans.py
 ```
 
-產物：`polar_quant_dumps/theta2_kmeans/codebook.json`
+產物：`configs/codebooks/theta2_kmeans/codebook.json`
 
 ---
 
 ## `exp/exp_polar_angle_dist.py`
 
-無 CLI；常數在檔案頂部。需先有 `polar_quant_dumps/theta2_kmeans/codebook.json`。
+無 CLI；常數在檔案頂部。需先有 `configs/codebooks/theta2_kmeans/codebook.json`。
 
 ```bash
 cd /home/jasonpan0930/var_research/VAR_polarQuant
 /home/jasonpan0930/.conda/envs/var_env/bin/python exp/exp_polar_angle_dist.py
 ```
 
-產物：`polar_quant_dumps/angle_plots/<config>/`
+產物：`artifacts/angle_plots/<config>/`
 
 ---
 
@@ -94,7 +94,7 @@ cd /home/jasonpan0930/var_research/VAR_polarQuant
 /home/jasonpan0930/.conda/envs/var_env/bin/python exp/exp_polar_kv_infer.py
 ```
 
-產物：`polar_quant_dumps/`（npz + sample 圖）
+產物：`artifacts/polar_kv_dumps/`（npz + sample 圖）
 
 ---
 
@@ -114,7 +114,7 @@ cd /home/jasonpan0930/var_research/VAR_polarQuant
 | `--top-k` | `900` | |
 | `--top-p` | `0.96` | |
 | `--seed-base` | `0` | `g_seed = seed_base + class*100 + sample_idx` |
-| `--kmeans-codebook` | `polar_quant_dumps/theta2_kmeans/codebook.json` | |
+| `--kmeans-codebook` | `configs/codebooks/theta2_kmeans/codebook.json` | |
 | `--skip-existing` | off | 已存在 PNG 則跳過 |
 | `--dry-run` | off | 只印計畫不生成 |
 | `--pack-npz-only` | off | 只把既有 PNG 目錄打包成 `.npz` |

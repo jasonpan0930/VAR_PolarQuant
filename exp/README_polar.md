@@ -55,10 +55,10 @@ FP 格式 θ₂ 映射：\(\theta_2 = \frac{v - v_{\min}}{v_{\max} - v_{\min}} \
 
 | # | 腳本 | 做了什麼 | 主要產物 |
 |---|------|----------|----------|
-| 1 | `exp_theta2_kmeans.py` | 在 `uniform_int4` 下收集 FP θ₂，以 full-pipeline MSE 加權做 16 中心 K-means | `polar_quant_dumps/theta2_kmeans/codebook.json`、`codebook_vs_uniform.png` |
+| 1 | `exp_theta2_kmeans.py` | 在 `uniform_int4` 下收集 FP θ₂，以 full-pipeline MSE 加權做 16 中心 K-means | `configs/codebooks/theta2_kmeans/codebook.json`、`codebook_vs_uniform.png` |
 | 2 | `exp_polar_angle_dist.py` | 載入 codebook，對 5 種 polar 配置各跑一次推論，統計 K 量化誤差並出圖 | `angle_plots/<config>/k_error_global.png`、`k_error_mse.png`、`sample_var.png`；`sample_original.png`（FP16 baseline） |
 | 3 | `exp_fid_sample.py` + `sbatch_fid_sample.sh` | 官方 FID 協議生成 50k PNG，打包 `.npz`，再交 OpenAI evaluator | `fid_samples/<config>_d16/`、`fid_samples/<config>_d16.npz` |
-| 4 | `exp_polar_kv_infer.py` | 推論並 dump 量化 K tensor（研究用存檔） | `polar_quant_dumps/stage*/block*_k_polar.npz`、`manifest.json`、對照 sample 圖 |
+| 4 | `exp_polar_kv_infer.py` | 推論並 dump 量化 K tensor（研究用存檔） | `artifacts/polar_kv_dumps/stage*/block*_k_polar.npz`、`manifest.json`、對照 sample 圖 |
 | — | `verify_fp6_e3m2.py` / `audit_fp6_e3m2.py` | FP6 E3M2 解碼與 polar roundtrip 單元檢查 | stdout 通過/失敗 |
 | — | `exp_kvCache.py` / `exp_fc2_input_hist.py` | 舊 VAR 分析腳本（QKT heatmap、fc2 輸入 histogram） | `kv_records/`、`fc2_records/` |
 
@@ -80,9 +80,9 @@ FP 格式 θ₂ 映射：\(\theta_2 = \frac{v - v_{\min}}{v_{\max} - v_{\min}} \
 
 | 路徑 | 內容 |
 |------|------|
-| `polar_quant_dumps/theta2_kmeans/codebook.json` | 16 個 θ₂ 中心（rad）+ fit meta |
-| `polar_quant_dumps/theta2_kmeans/codebook_vs_uniform.png` | 與 uniform 對照 |
-| `polar_quant_dumps/angle_plots/int6_kmeans_int4/k_error_*.png` | 擬合後該配置單獨評估（腳本內可選） |
+| `configs/codebooks/theta2_kmeans/codebook.json` | 16 個 θ₂ 中心（rad）+ fit meta |
+| `configs/codebooks/theta2_kmeans/codebook_vs_uniform.png` | 與 uniform 對照 |
+| `artifacts/angle_plots/int6_kmeans_int4/k_error_*.png` | 擬合後該配置單獨評估（腳本內可選） |
 
 **注意**：codebook 只需在資料/設定變更時重做；`exp_polar_angle_dist.py` **不會**重新 K-means，只載入既有 JSON。
 
@@ -101,7 +101,7 @@ FP 格式 θ₂ 映射：\(\theta_2 = \frac{v - v_{\min}}{v_{\max} - v_{\min}} \
 **輸出**（每配置一個子目錄）：
 
 ```
-polar_quant_dumps/angle_plots/
+artifacts/angle_plots/
   sample_original.png
   uniform_int4/
     k_error_global.png    # NRMSE (%) + cosine similarity（雙 panel）
@@ -131,7 +131,7 @@ polar_quant_dumps/angle_plots/
 **產物**：
 
 ```
-polar_quant_dumps/
+artifacts/polar_kv_dumps/
   sample_baseline.png      # FP16 K
   sample_polar.png         # polar quant（腳本內 THETA2_QUANT）
   sample_compare.png

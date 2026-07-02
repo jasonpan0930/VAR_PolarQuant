@@ -47,7 +47,8 @@ from utils.theta2_kmeans import load_theta2_codebook
 
 NUM_CLASSES = 1000
 SAMPLES_PER_CLASS_DEFAULT = 50
-THETA2_KMEANS_CODEBOOK = ROOT / 'polar_quant_dumps' / 'theta2_kmeans' / 'codebook.json'
+CODEBOOK_ROOT = ROOT / 'configs' / 'codebooks'
+THETA2_KMEANS_CODEBOOK = CODEBOOK_ROOT / 'theta2_kmeans' / 'codebook.json'
 
 # VAR paper FID settings
 FID_CFG = 1.5
@@ -82,7 +83,7 @@ def parse_args() -> argparse.Namespace:
                    help='quantize V cache (default: True); --no-quant-v for K-only quant')
     p.add_argument('--theta2-levels', type=str, default=None,
                    help='per-level codebook assignment for int6_kmeans_int4, e.g. "1,1,1,4,4" '
-                        '(loads CBs from polar_quant_dumps/theta2_kmeans_d{DEPTH}_T{N}/codebook.json)')
+                        '(loads CBs from configs/codebooks/theta2_kmeans_d{DEPTH}_T{N}/codebook.json)')
     return p.parse_args()
 
 
@@ -112,7 +113,7 @@ def setup_polar(var, polar_quant: str, kmeans_codebook: Path, quant_v: bool = Tr
             # Load unique codebooks
             cb_cache: Dict[int, list] = {}
             for n in set(level_ids):
-                cb_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{model_depth}_T{n}' / 'codebook.json'
+                cb_path = CODEBOOK_ROOT / f'theta2_kmeans_d{model_depth}_T{n}' / 'codebook.json'
                 if not cb_path.is_file():
                     raise FileNotFoundError(f'per-level codebook missing: {cb_path}')
                 centers, _ = load_theta2_codebook(cb_path)
@@ -126,7 +127,7 @@ def setup_polar(var, polar_quant: str, kmeans_codebook: Path, quant_v: bool = Tr
             if quant_v:
                 v_cb_cache: Dict[int, list] = {}
                 for n in set(level_ids):
-                    v_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{model_depth}_v_T{n}' / 'codebook.json'
+                    v_path = CODEBOOK_ROOT / f'theta2_kmeans_d{model_depth}_v_T{n}' / 'codebook.json'
                     if v_path.is_file():
                         v_centers, _ = load_theta2_codebook(v_path)
                         v_cb_cache[n] = list(float(c) for c in v_centers)

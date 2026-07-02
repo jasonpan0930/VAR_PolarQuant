@@ -9,7 +9,7 @@
 #   To save to a custom dir (e.g. to later copy to consumption paths):
 #   sbatch --export=ALL,REFIT=1,PER_LEVEL_K="16 16 16 16 16",OUT_DIR=/path/to/my_cb_k16 ...
 #
-# Outputs (per OUT_DIR or default polar_quant_dumps/theta2_kmeans_d<depth>_T{N}):
+# Outputs (per OUT_DIR or default configs/codebooks/theta2_kmeans_d<depth>_T{N}):
 #   T{1..5}/codebook.json      (K)
 #   T{1..5}_v/codebook.json    (V)
 

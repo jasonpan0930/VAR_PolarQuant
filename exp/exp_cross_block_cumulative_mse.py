@@ -7,10 +7,10 @@ Modes (--mode):
   both: run both forced and free
 
 Forced mode outputs:
-  polar_quant_dumps/cross_block_mse/<prefix>nrmse_percent_at_depth_every4.png
-  polar_quant_dumps/cross_block_mse/<prefix>abs_mse_at_depth_every4.png
-  polar_quant_dumps/cross_block_mse/<prefix>cosine_distance_at_depth_every4.png
-  polar_quant_dumps/cross_block_mse/<prefix>block_error_at_depth_every4.json
+  artifacts/cross_block_mse/<prefix>nrmse_percent_at_depth_every4.png
+  artifacts/cross_block_mse/<prefix>abs_mse_at_depth_every4.png
+  artifacts/cross_block_mse/<prefix>cosine_distance_at_depth_every4.png
+  artifacts/cross_block_mse/<prefix>block_error_at_depth_every4.json
 
 Free-running mode outputs:
   .../<prefix>heatmap_nrmse_{method}_{mode_suffix}.png         (scale × block heatmap)
@@ -71,9 +71,10 @@ from models import build_vae_var
 from utils.angle_quant import POLAR_QUANT_CONFIGS, PolarQuantConfig, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v, register_per_level_codebook
 from utils.theta2_kmeans import load_theta2_codebook
 
-OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse"
-THETA2_KMEANS_CODEBOOK = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30" / "codebook.json"
-THETA2_KMEANS_CODEBOOK_V = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30_v" / "codebook.json"
+CODEBOOK_ROOT = ROOT / "configs" / "codebooks"
+OUT_DIR = ROOT / "artifacts" / "cross_block_mse"
+THETA2_KMEANS_CODEBOOK = CODEBOOK_ROOT / "theta2_kmeans_d30" / "codebook.json"
+THETA2_KMEANS_CODEBOOK_V = CODEBOOK_ROOT / "theta2_kmeans_d30_v" / "codebook.json"
 MODEL_DEPTH = 30
 BATCH_SIZE = 1
 CLASS_LABELS = (22, 45, 123, 437, 701)
@@ -415,7 +416,7 @@ def parse_args() -> argparse.Namespace:
         metavar=("NAME", "LEVELS"),
         help="Add per-level kmeans configs. Format: NAME LEVEL_ASSIGNMENT pairs.\n"
              "Example: --per-level-kmeans my_11144 1,1,1,4,4 my_12345 1,2,3,4,5\n"
-             "Loads codebooks from polar_quant_dumps/theta2_kmeans_d30_T{N}/codebook.json",
+             "Loads codebooks from configs/codebooks/theta2_kmeans_d30_T{N}/codebook.json",
     )
     p.add_argument(
         "--mode", type=str, default="forced", choices=["forced", "free", "both"],
@@ -606,7 +607,7 @@ def _register_per_level_configs(per_level_args: list, quant_v: bool) -> tuple:
             raise ValueError(f"--per-level-kmeans {config_name}: LEVELS must have 5 entries, got {len(level_ids)}")
         cb_cache: Dict[int, list] = {}
         for n in set(level_ids):
-            cb_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{MODEL_DEPTH}_T{n}' / 'codebook.json'
+            cb_path = CODEBOOK_ROOT / f'theta2_kmeans_d{MODEL_DEPTH}_T{n}' / 'codebook.json'
             if not cb_path.is_file():
                 raise FileNotFoundError(f'per-level codebook missing: {cb_path}')
             centers, _ = load_theta2_codebook(cb_path)
@@ -620,7 +621,7 @@ def _register_per_level_configs(per_level_args: list, quant_v: bool) -> tuple:
             v_cb_cache: Dict[int, list] = {}
             all_v_found = True
             for n in set(level_ids):
-                v_path = ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{MODEL_DEPTH}_v_T{n}' / 'codebook.json'
+                v_path = CODEBOOK_ROOT / f'theta2_kmeans_d{MODEL_DEPTH}_v_T{n}' / 'codebook.json'
                 if v_path.is_file():
                     v_centers, _ = load_theta2_codebook(v_path)
                     v_cb_cache[n] = list(float(c) for c in v_centers)

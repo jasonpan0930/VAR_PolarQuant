@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-k", type=int, default=900)
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--quant-v", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--out-json", type=Path, default=ROOT / "polar_quant_dumps" / "attention_drift_diag.json")
+    p.add_argument("--out-json", type=Path, default=ROOT / "artifacts" / "attention_drift_diag.json")
     p.add_argument("--kmeans-codebook", type=Path, default=None)
     p.add_argument("--theta2-levels", type=str, default=None,
                    help="per-level codebook assignment for int6_kmeans_int4, e.g. 1,1,3,3,3")
@@ -120,7 +120,7 @@ def register_method_codebooks(method: str, args: argparse.Namespace) -> str:
             raise ValueError("--theta2-levels must have 5 comma-separated entries")
         cb_cache: Dict[int, list] = {}
         for n in set(level_ids):
-            cb_path = ROOT / "polar_quant_dumps" / f"theta2_kmeans_d{args.model_depth}_T{n}" / "codebook.json"
+            cb_path = ROOT / "configs" / "codebooks" / f"theta2_kmeans_d{args.model_depth}_T{n}" / "codebook.json"
             centers, _ = load_theta2_codebook(cb_path)
             cb_cache[n] = [float(c) for c in centers]
         config_name = f"int6_kmeans_int4_L{''.join(str(n) for n in level_ids)}"
@@ -133,7 +133,7 @@ def register_method_codebooks(method: str, args: argparse.Namespace) -> str:
             v_cache: Dict[int, list] = {}
             all_v = True
             for n in set(level_ids):
-                v_path = ROOT / "polar_quant_dumps" / f"theta2_kmeans_d{args.model_depth}_v_T{n}" / "codebook.json"
+                v_path = ROOT / "configs" / "codebooks" / f"theta2_kmeans_d{args.model_depth}_v_T{n}" / "codebook.json"
                 if not v_path.is_file():
                     all_v = False
                     break
@@ -149,9 +149,9 @@ def register_method_codebooks(method: str, args: argparse.Namespace) -> str:
 
     cb = args.kmeans_codebook
     if cb is None:
-        cb = ROOT / "polar_quant_dumps" / f"theta2_kmeans_d{args.model_depth}" / "codebook.json"
+        cb = ROOT / "configs" / "codebooks" / f"theta2_kmeans_d{args.model_depth}" / "codebook.json"
         if args.model_depth == 16 and not cb.is_file():
-            cb = ROOT / "polar_quant_dumps" / "theta2_kmeans" / "codebook.json"
+            cb = ROOT / "configs" / "codebooks" / "theta2_kmeans" / "codebook.json"
     centers, _ = load_theta2_codebook(cb)
     register_theta2_kmeans_codebook(centers)
     v_cb = cb.parent.parent / f"{cb.parent.name}_v" / "codebook.json"

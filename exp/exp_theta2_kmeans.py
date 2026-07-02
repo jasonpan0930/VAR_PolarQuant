@@ -9,9 +9,9 @@ Codebook is model-specific: fit with the same depth you use at FID time.
       --class-labels 22 45 123 437 701 --target-blocks 7 15 22 29
 
 Outputs (per depth):
-  polar_quant_dumps/theta2_kmeans_d<depth>/codebook.json
-  polar_quant_dumps/theta2_kmeans_d<depth>/codebook_vs_uniform.png
-  polar_quant_dumps/angle_plots/d<depth>/int6_kmeans_int4/k_error_global.png
+  configs/codebooks/theta2_kmeans_d<depth>/codebook.json
+  artifacts/theta2_kmeans_d<depth>/codebook_vs_uniform.png
+  artifacts/angle_plots/d<depth>/int6_kmeans_int4/k_error_global.png
 """
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
+
+CODEBOOK_ROOT = ROOT / 'configs' / 'codebooks'
+ARTIFACT_ROOT = ROOT / 'artifacts'
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -63,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         '--codebook-out', type=Path, default=None,
-        help='default: polar_quant_dumps/theta2_kmeans_d<depth>/codebook.json',
+        help='default: configs/codebooks/theta2_kmeans_d<depth>/codebook.json',
     )
     p.add_argument(
         '--target-blocks', type=int, nargs='+', default=None,
@@ -92,20 +95,20 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         '--out-dir', type=Path, default=None,
-        help='output root dir for per-level codebooks (default: polar_quant_dumps/theta2_kmeans_d<depth>_T{N}/)',
+        help='output root dir for per-level codebooks (default: configs/codebooks/theta2_kmeans_d<depth>_T{N}/)',
     )
     return p.parse_args()
 
 
 def default_codebook_path(depth: int) -> Path:
-    legacy = ROOT / 'polar_quant_dumps' / 'theta2_kmeans' / 'codebook.json'
+    legacy = CODEBOOK_ROOT / 'theta2_kmeans' / 'codebook.json'
     if depth == 16 and legacy.is_file():
         return legacy
-    return ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{depth}' / 'codebook.json'
+    return CODEBOOK_ROOT / f'theta2_kmeans_d{depth}' / 'codebook.json'
 
 
 def default_v_codebook_path(depth: int) -> Path:
-    return ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{depth}_v' / 'codebook.json'
+    return CODEBOOK_ROOT / f'theta2_kmeans_d{depth}_v' / 'codebook.json'
 
 
 def default_per_level_codebook_path(depth: int, level: int, target_v: bool = False, out_dir: Optional[Path] = None) -> Path:
@@ -114,7 +117,7 @@ def default_per_level_codebook_path(depth: int, level: int, target_v: bool = Fal
         suffix = '_v' if target_v else ''
         return out_dir / f'theta2_kmeans_d{depth}{suffix}_T{level}' / 'codebook.json'
     suffix = '_v' if target_v else ''
-    return ROOT / 'polar_quant_dumps' / f'theta2_kmeans_d{depth}{suffix}_T{level}' / 'codebook.json'
+    return CODEBOOK_ROOT / f'theta2_kmeans_d{depth}{suffix}_T{level}' / 'codebook.json'
 
 
 def default_target_blocks(depth: int) -> tuple[int, ...]:
@@ -287,6 +290,7 @@ def main() -> None:
     # ── legacy single-codebook path ──
     codebook_path = args.codebook_out or (default_v_codebook_path(depth) if args.collect_v else default_codebook_path(depth))
     out_kmeans = codebook_path.parent
+    codebook_plot_dir = ARTIFACT_ROOT / 'codebooks' / out_kmeans.name
     config_name = 'int6_kmeans_int4_v' if args.collect_v else 'int6_kmeans_int4'
     target_label = 'V' if args.collect_v else 'K'
     print(f'target={target_label} config={config_name} codebook_path={codebook_path}')
@@ -326,15 +330,17 @@ def main() -> None:
         print(f'  [{i:2d}] {c:.8f}')
 
     n_cls, n_blk = len(class_labels), len(target_blocks)
+    codebook_plot_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = codebook_plot_dir / 'codebook_vs_uniform.png'
     plot_codebooks(
-        centers, out_kmeans / 'codebook_vs_uniform.png', depth,
+        centers, plot_path, depth,
         subtitle=f'{target_label}-K-means: {n_cls} classes × {n_blk} blocks (L0 only)',
     )
-    print(f'codebook plot -> {out_kmeans / "codebook_vs_uniform.png"}')
+    print(f'codebook plot -> {plot_path}')
 
     if not args.skip_k_error_plot and not args.collect_v:
         eval_class = class_labels[0]
-        out_dir = ROOT / 'polar_quant_dumps' / 'angle_plots' / f'd{depth}' / config_name
+        out_dir = ARTIFACT_ROOT / 'angle_plots' / f'd{depth}' / config_name
         run_k_error_plot(
             var,
             torch.tensor([eval_class], device=device),

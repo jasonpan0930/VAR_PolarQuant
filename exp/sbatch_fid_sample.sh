@@ -43,7 +43,7 @@ cd "${ROOT}"
 #
 # K-means codebook (fit once per model depth, then FID):
 #   srun ... python exp/exp_theta2_kmeans.py --model-depth 30 --refit
-#   -> polar_quant_dumps/theta2_kmeans_d30/codebook.json
+#   -> configs/codebooks/theta2_kmeans_d30/codebook.json
 #
 POLAR_QUANT="${1:-none}"
 PYTHON="${PYTHON:-/home/jasonpan0930/.conda/envs/var_env/bin/python}"
@@ -60,9 +60,9 @@ mkdir -p "${ROOT}/logs" "${OUT_DIR}"
 
 KMEANS_ARGS=()
 if [[ "${POLAR_QUANT}" == "int6_kmeans_int4" ]]; then
-  KMEANS_CB="${ROOT}/polar_quant_dumps/theta2_kmeans_d${DEPTH}/codebook.json"
-  if [[ "${DEPTH}" == "16" && ! -f "${KMEANS_CB}" && -f "${ROOT}/polar_quant_dumps/theta2_kmeans/codebook.json" ]]; then
-    KMEANS_CB="${ROOT}/polar_quant_dumps/theta2_kmeans/codebook.json"
+  KMEANS_CB="${ROOT}/configs/codebooks/theta2_kmeans_d${DEPTH}/codebook.json"
+  if [[ "${DEPTH}" == "16" && ! -f "${KMEANS_CB}" && -f "${ROOT}/configs/codebooks/theta2_kmeans/codebook.json" ]]; then
+    KMEANS_CB="${ROOT}/configs/codebooks/theta2_kmeans/codebook.json"
   fi
   KMEANS_ARGS=(--kmeans-codebook "${KMEANS_CB}")
 fi

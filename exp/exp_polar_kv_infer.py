@@ -4,11 +4,11 @@ Polar-quantized K cache inference + save quant tensors for research.
   cd VAR_polarQuant && python exp/exp_polar_kv_infer.py
 
 Outputs:
-  polar_quant_dumps/sample_baseline.png   (fp16 K cache, same seed/class)
-  polar_quant_dumps/sample_polar.png
-  polar_quant_dumps/sample_compare.png    (baseline | polar side-by-side)
-  polar_quant_dumps/stageXX_pnY/blockZZ_k_polar.npz  (q1, q2, z per layer/stage)
-  polar_quant_dumps/manifest.json
+  artifacts/polar_kv_dumps/sample_baseline.png   (fp16 K cache, same seed/class)
+  artifacts/polar_kv_dumps/sample_polar.png
+  artifacts/polar_kv_dumps/sample_compare.png    (baseline | polar side-by-side)
+  artifacts/polar_kv_dumps/stageXX_pnY/blockZZ_k_polar.npz  (q1, q2, z per layer/stage)
+  artifacts/polar_kv_dumps/manifest.json
 """
 import os
 import random
@@ -29,7 +29,7 @@ from models import build_vae_var
 from utils.polar_kv_quant import roundtrip_error
 from utils.polar_kv_store import PolarKVDumpSession
 
-OUT_DIR = ROOT / 'polar_quant_dumps'
+OUT_DIR = ROOT / 'artifacts' / 'polar_kv_dumps'
 MODEL_DEPTH = 16
 BATCH_SIZE = 1
 CLASS_LABELS = (437,)
