@@ -56,7 +56,12 @@ def cordic_vectoring(
       k_table: precomputed K[n] shape (>= num_iters+1,)
     """
     if num_iters < 1:
-        raise ValueError(f"num_iters must be >= 1, got {num_iters}")
+        # Sentinel: negative means exact torch.atan2 + torch.sqrt (no CORDIC)
+        if num_iters < 0:
+            r = torch.sqrt(x * x + y * y + 1e-12)
+            theta = torch.atan2(y, x)
+            return r, theta
+        raise ValueError(f"num_iters must be >= 1 or negative sentinel, got {num_iters}")
 
     if atan_table is None or atan_table.shape[0] < num_iters:
         atan_table = _build_atan_table(num_iters, device=x.device, dtype=x.dtype)

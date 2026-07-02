@@ -68,10 +68,10 @@ import torch
 
 import models.var as var_mod
 from models import build_vae_var
-from utils.angle_quant import POLAR_QUANT_CONFIGS, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v, register_per_level_codebook
+from utils.angle_quant import POLAR_QUANT_CONFIGS, PolarQuantConfig, register_theta2_kmeans_codebook, register_theta2_kmeans_codebook_v, register_per_level_codebook
 from utils.theta2_kmeans import load_theta2_codebook
 
-OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse" / "quant_K_only"
+OUT_DIR = ROOT / "polar_quant_dumps" / "cross_block_mse"
 THETA2_KMEANS_CODEBOOK = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30" / "codebook.json"
 THETA2_KMEANS_CODEBOOK_V = ROOT / "polar_quant_dumps" / "theta2_kmeans_d30_v" / "codebook.json"
 MODEL_DEPTH = 30
@@ -424,6 +424,13 @@ def parse_args() -> argparse.Namespace:
              "  free:   free-running — same seed, no forced sampler, all scales\n"
              "  both:   run both forced and free",
     )
+    p.add_argument(
+        "--cordic-iters", type=int, nargs="+", default=[],
+        help="Sweep CORDIC iteration counts. Creates config variants for each method "
+             "(e.g. uniform_int4_c5, uniform_int4_c6, ...) and generates a combined "
+             "NRMSE-at-depth plot comparing all iteration counts. "
+             "Example: --cordic-iters 5 6 7 8 9 10 11 12 100",
+    )
     return p.parse_args()
 
 
@@ -640,7 +647,50 @@ def main_forced(args) -> None:
     quant_v = args.quant_v
     methods_list, methods = _register_per_level_configs(args.per_level_kmeans, quant_v)
 
+    # ── CORDIC sweep: expand each method into N cordic variants ──
+    cordic_iters_list = args.cordic_iters
+    cordic_method_map: Dict[str, str] = {}  # variant_name -> base_method
+    if cordic_iters_list:
+        if not args.per_level_kmeans:
+            raise ValueError(
+                "--cordic-iters requires --per-level-kmeans "
+                "(e.g. --per-level-kmeans my_11333 1,1,3,3,3)"
+            )
+        # Only sweep per-level kmeans entries, not default METHODS
+        methods = tuple(m for m in methods if m not in METHODS)
+        methods_list = list(methods)
+        if not methods:
+            raise ValueError("no per-level kmeans methods found for --cordic-iters")
+    if cordic_iters_list:
+        expanded_methods = []
+        for method in methods:
+            base_cfg = POLAR_QUANT_CONFIGS.get(method)
+            if base_cfg is None:
+                print(f"  [cordic] skip {method}: not found in POLAR_QUANT_CONFIGS")
+                continue
+            if method not in expanded_methods:
+                expanded_methods.append(method)
+            for iters in cordic_iters_list:
+                var_name = f"{method}_c{iters}"
+                use_exact = iters >= 100
+                var_cordic_iters = -1 if use_exact else iters
+                var_label = f"{base_cfg.label} (exact)" if use_exact else f"{base_cfg.label} (CORDIC {iters} iters)"
+                var_cfg = PolarQuantConfig(
+                    name=var_name,
+                    label=var_label,
+                    theta1=base_cfg.theta1,
+                    _theta2=base_cfg._theta2,
+                    cordic_iters=var_cordic_iters,
+                )
+                POLAR_QUANT_CONFIGS[var_name] = var_cfg
+                expanded_methods.append(var_name)
+                cordic_method_map[var_name] = method
+                print(f"  [cordic] registered {var_name} (iters={iters})")
+        methods = tuple(expanded_methods)
+        methods_list = list(expanded_methods)
+
     vae, var = _build_model(device)
+    print(f"[main_forced] model loaded (depth={len(var.blocks)}), device={device}", flush=True)
 
     depth = len(var.blocks)
     sample_idx = depth_samples(depth, every=EVERY_N_DEPTH)
@@ -652,6 +702,7 @@ def main_forced(args) -> None:
         raise ValueError("no class labels provided")
     quant_mode = "KV" if quant_v else "K-only"
     print(f"running labels={label_list}, seed={SEED}, cumulative={args.cumulative}, quant_v={quant_v} ({quant_mode}), mode=forced")
+    print(f"[main_forced] comparing {len(methods)} methods over {len(label_list)} labels (cordic sweep: {bool(cordic_iters_list)})", flush=True)
 
     method_to_block_nmse_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
     method_to_block_nrmse_pct_sum: Dict[str, np.ndarray] = {m: np.zeros(depth, dtype=np.float64) for m in methods}
@@ -663,10 +714,11 @@ def main_forced(args) -> None:
     method_to_cum_at_depth_sum: Dict[str, np.ndarray] = {m: np.zeros(len(sample_idx), dtype=np.float64) for m in methods}
 
     # ── per-scale accumulators (all 10 scales) ──
-    method_ps_nrmse_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
-    method_ps_cos_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
-    method_ps_macro_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
-    method_ps_count: Dict[str, int] = {m: 0 for m in methods}
+    if not cordic_iters_list:
+        method_ps_nrmse_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
+        method_ps_cos_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
+        method_ps_macro_sum: Dict[str, np.ndarray] = {m: np.zeros((num_stages, depth), dtype=np.float64) for m in methods}
+        method_ps_count: Dict[str, int] = {m: 0 for m in methods}
 
     for label in label_list:
         label_B = torch.tensor([label], device=device)
@@ -695,18 +747,19 @@ def main_forced(args) -> None:
                 method_to_cum_at_depth_sum[method] += np.cumsum(per_block_nmse)[sample_idx]
 
             # ── per-scale block NRMSE & cosine (all 10 scales) ──
-            set_infer_seeds()
-            ps_nrmse, ps_cos, ps_macro = compute_method_block_metrics(
-                var, label_B, device=device, method=method,
-                baseline_outputs=baseline_outputs,
-                forced_stage_indices=baseline_stage_indices,
-                quant_v=quant_v,
-                all_scales=True,
-            )
-            method_ps_nrmse_sum[method] += ps_nrmse
-            method_ps_cos_sum[method] += ps_cos
-            method_ps_macro_sum[method] += ps_macro
-            method_ps_count[method] += 1
+            if not cordic_iters_list:
+                set_infer_seeds()
+                ps_nrmse, ps_cos, ps_macro = compute_method_block_metrics(
+                    var, label_B, device=device, method=method,
+                    baseline_outputs=baseline_outputs,
+                    forced_stage_indices=baseline_stage_indices,
+                    quant_v=quant_v,
+                    all_scales=True,
+                )
+                method_ps_nrmse_sum[method] += ps_nrmse
+                method_ps_cos_sum[method] += ps_cos
+                method_ps_macro_sum[method] += ps_macro
+                method_ps_count[method] += 1
 
     n_labels = float(len(label_list))
     method_to_block_nmse: Dict[str, List[float]] = {m: (method_to_block_nmse_sum[m] / n_labels).tolist() for m in methods}
@@ -718,9 +771,10 @@ def main_forced(args) -> None:
     method_to_cosine_distance_at_depth: Dict[str, List[float]] = {m: (method_to_cos_at_depth_sum[m] / n_labels).tolist() for m in methods}
 
     # ── per-scale averages ──
-    method_ps_nrmse: Dict[str, np.ndarray] = {m: method_ps_nrmse_sum[m] / max(method_ps_count[m], 1) for m in methods}
-    method_ps_cos: Dict[str, np.ndarray] = {m: method_ps_cos_sum[m] / max(method_ps_count[m], 1) for m in methods}
-    method_ps_macro: Dict[str, np.ndarray] = {m: method_ps_macro_sum[m] / max(method_ps_count[m], 1) for m in methods}
+    if not cordic_iters_list:
+        method_ps_nrmse: Dict[str, np.ndarray] = {m: method_ps_nrmse_sum[m] / max(method_ps_count[m], 1) for m in methods}
+        method_ps_cos: Dict[str, np.ndarray] = {m: method_ps_cos_sum[m] / max(method_ps_count[m], 1) for m in methods}
+        method_ps_macro: Dict[str, np.ndarray] = {m: method_ps_macro_sum[m] / max(method_ps_count[m], 1) for m in methods}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{args.out_prefix}_" if args.out_prefix else ""
@@ -743,82 +797,137 @@ def main_forced(args) -> None:
                 out_path=cos_fig_path)
 
     # ── per-scale block NRMSE heatmaps (forced token path, one per method) ──
-    for method in methods:
-        hm_path = OUT_DIR / f"{prefix}heatmap_nrmse_{method}_{mode_suffix}_forced.png"
-        _plot_heatmap(
-            method_ps_nrmse[method],
-            ylabel="Scale",
-            title=f"Per-scale block NRMSE % ({method}, {quant_mode}, forced)",
-            out_path=hm_path,
-            num_stages=num_stages,
-            num_blocks=depth,
-            cbar_label="NRMSE (%)",
-        )
-        print(f"saved forced per-scale NRMSE heatmap -> {hm_path}")
+    if not cordic_iters_list:
+        for method in methods:
+            hm_path = OUT_DIR / f"{prefix}heatmap_nrmse_{method}_{mode_suffix}_forced.png"
+            _plot_heatmap(
+                method_ps_nrmse[method],
+                ylabel="Scale",
+                title=f"Per-scale block NRMSE % ({method}, {quant_mode}, forced)",
+                out_path=hm_path,
+                num_stages=num_stages,
+                num_blocks=depth,
+                cbar_label="NRMSE (%)",
+            )
+            print(f"saved forced per-scale NRMSE heatmap -> {hm_path}")
 
     # ── per-scale block cosine heatmaps (forced token path, one per method) ──
-    for method in methods:
-        cos_hm_path = OUT_DIR / f"{prefix}heatmap_cos_{method}_{mode_suffix}_forced.png"
-        _plot_heatmap(
-            method_ps_cos[method],
-            ylabel="Scale",
-            title=f"Per-scale block cos distance ({method}, {quant_mode}, forced)",
-            out_path=cos_hm_path,
-            num_stages=num_stages,
-            num_blocks=depth,
-            cbar_label="cosine distance",
-        )
-        print(f"saved forced per-scale cosine heatmap -> {cos_hm_path}")
+    if not cordic_iters_list:
+        for method in methods:
+            cos_hm_path = OUT_DIR / f"{prefix}heatmap_cos_{method}_{mode_suffix}_forced.png"
+            _plot_heatmap(
+                method_ps_cos[method],
+                ylabel="Scale",
+                title=f"Per-scale block cos distance ({method}, {quant_mode}, forced)",
+                out_path=cos_hm_path,
+                num_stages=num_stages,
+                num_blocks=depth,
+                cbar_label="cosine distance",
+            )
+            print(f"saved forced per-scale cosine heatmap -> {cos_hm_path}")
 
     # ── per-scale NRMSE line plots (forced, one per method) ──
-    for method in methods:
-        ps_line: Dict[int, List[float]] = {}
-        for si in range(num_stages):
-            ps_line[si] = method_ps_nrmse[method][si, :].tolist()
-        line_path = OUT_DIR / f"{prefix}perscale_nrmse_{method}_{mode_suffix}_forced.png"
-        _plot_per_scale_lines(
-            ps_line, depth, line_path,
-            method_label=method, ylabel="NRMSE (%)", quant_mode=f"{quant_mode}, forced",
-        )
-        print(f"saved forced per-scale NRMSE lines -> {line_path}")
+    if not cordic_iters_list:
+        for method in methods:
+            ps_line: Dict[int, List[float]] = {}
+            for si in range(num_stages):
+                ps_line[si] = method_ps_nrmse[method][si, :].tolist()
+            line_path = OUT_DIR / f"{prefix}perscale_nrmse_{method}_{mode_suffix}_forced.png"
+            _plot_per_scale_lines(
+                ps_line, depth, line_path,
+                method_label=method, ylabel="NRMSE (%)", quant_mode=f"{quant_mode}, forced",
+            )
+            print(f"saved forced per-scale NRMSE lines -> {line_path}")
 
     # ── per-scale cosine line plots (forced, one per method) ──
-    for method in methods:
-        ps_line: Dict[int, List[float]] = {}
-        for si in range(num_stages):
-            ps_line[si] = method_ps_cos[method][si, :].tolist()
-        line_path = OUT_DIR / f"{prefix}perscale_cos_{method}_{mode_suffix}_forced.png"
-        _plot_per_scale_lines(
-            ps_line, depth, line_path,
-            method_label=method, ylabel="cosine distance", quant_mode=f"{quant_mode}, forced",
-        )
-        print(f"saved forced per-scale cosine lines -> {line_path}")
+    if not cordic_iters_list:
+        for method in methods:
+            ps_line: Dict[int, List[float]] = {}
+            for si in range(num_stages):
+                ps_line[si] = method_ps_cos[method][si, :].tolist()
+            line_path = OUT_DIR / f"{prefix}perscale_cos_{method}_{mode_suffix}_forced.png"
+            _plot_per_scale_lines(
+                ps_line, depth, line_path,
+                method_label=method, ylabel="cosine distance", quant_mode=f"{quant_mode}, forced",
+            )
+            print(f"saved forced per-scale cosine lines -> {line_path}")
 
     # ── per-scale macro NRMSE heatmaps (forced token path, one per method) ──
-    for method in methods:
-        macro_hm_path = OUT_DIR / f"{prefix}heatmap_macro_nrmse_{method}_{mode_suffix}_forced.png"
-        _plot_heatmap(
-            method_ps_macro[method],
-            ylabel="Scale",
-            title=f"Per-scale block macro NRMSE % ({method}, {quant_mode}, forced)",
-            out_path=macro_hm_path,
-            num_stages=num_stages,
-            num_blocks=depth,
-            cbar_label="macro NRMSE (%)",
-        )
-        print(f"saved forced per-scale macro NRMSE heatmap -> {macro_hm_path}")
+    if not cordic_iters_list:
+        for method in methods:
+            macro_hm_path = OUT_DIR / f"{prefix}heatmap_macro_nrmse_{method}_{mode_suffix}_forced.png"
+            _plot_heatmap(
+                method_ps_macro[method],
+                ylabel="Scale",
+                title=f"Per-scale block macro NRMSE % ({method}, {quant_mode}, forced)",
+                out_path=macro_hm_path,
+                num_stages=num_stages,
+                num_blocks=depth,
+                cbar_label="macro NRMSE (%)",
+            )
+            print(f"saved forced per-scale macro NRMSE heatmap -> {macro_hm_path}")
 
     # ── per-scale macro NRMSE line plots (forced, one per method) ──
-    for method in methods:
-        ps_line: Dict[int, List[float]] = {}
-        for si in range(num_stages):
-            ps_line[si] = method_ps_macro[method][si, :].tolist()
-        line_path = OUT_DIR / f"{prefix}perscale_macro_nrmse_{method}_{mode_suffix}_forced.png"
-        _plot_per_scale_lines(
-            ps_line, depth, line_path,
-            method_label=method, ylabel="macro NRMSE (%)", quant_mode=f"{quant_mode}, forced",
-        )
-        print(f"saved forced per-scale macro NRMSE lines -> {line_path}")
+    if not cordic_iters_list:
+        for method in methods:
+            ps_line: Dict[int, List[float]] = {}
+            for si in range(num_stages):
+                ps_line[si] = method_ps_macro[method][si, :].tolist()
+            line_path = OUT_DIR / f"{prefix}perscale_macro_nrmse_{method}_{mode_suffix}_forced.png"
+            _plot_per_scale_lines(
+                ps_line, depth, line_path,
+                method_label=method, ylabel="macro NRMSE (%)", quant_mode=f"{quant_mode}, forced",
+            )
+            print(f"saved forced per-scale macro NRMSE lines -> {line_path}")
+
+    # ── CORDIC sweep: combined NRMSE-at-depth plot (one curve per iteration count) ──
+    if cordic_iters_list and cordic_method_map:
+        # group cordic variants by base method
+        grouped: Dict[str, Dict[int, str]] = {}  # base_method -> {iters -> variant_name}
+        for var_name, base in cordic_method_map.items():
+            grouped.setdefault(base, {})
+        for var_name, base in cordic_method_map.items():
+            # parse iters from name like uniform_int4_c5
+            suffix = var_name.rsplit("_c", 1)
+            if len(suffix) == 2 and suffix[1].isdigit():
+                iters = int(suffix[1])
+                grouped[base][iters] = var_name
+
+        for base_method, iters_to_variant in grouped.items():
+            combined_nrmse: Dict[str, List[float]] = {}
+            for iters in sorted(iters_to_variant.keys()):
+                vname = iters_to_variant[iters]
+                vals = method_to_nrmse_percent_at_depth.get(vname)
+                if vals is None:
+                    continue
+                label = "golden" if iters >= 100 else f"c{iters}"
+                combined_nrmse[label] = vals
+
+            if len(combined_nrmse) <= 1:
+                continue  # nothing to compare
+
+            sweep_fig_path = OUT_DIR / f"{prefix}cordic_sweep_nrmse_{base_method}_{mode_suffix}_every4.png"
+            _plot_lines(
+                sample_depths, combined_nrmse,
+                ylabel="NRMSE at depth d (%)",
+                title=f"CORDIC iters sweep: block NRMSE vs baseline ({base_method}, {quant_mode})",
+                out_path=sweep_fig_path,
+            )
+            print(f"saved CORDIC sweep NRMSE plot -> {sweep_fig_path}")
+
+            # also save a JSON with the sweep data
+            sweep_json = OUT_DIR / f"{prefix}cordic_sweep_nrmse_{base_method}_{mode_suffix}_every4.json"
+            sweep_data = {
+                "base_method": base_method,
+                "cordic_iters": sorted(iters_to_variant.keys()),
+                "quant_mode": quant_mode,
+                "sample_depths": sample_depths,
+                "class_labels": label_list,
+                "nrmse_percent_at_depth": combined_nrmse,
+            }
+            with open(sweep_json, "w") as f:
+                json.dump(sweep_data, f, indent=2)
+            print(f"saved CORDIC sweep JSON -> {sweep_json}")
 
     json_path = OUT_DIR / f"{prefix}block_error_at_depth_{mode_suffix}_every4.json"
     payload = {
@@ -843,10 +952,11 @@ def main_forced(args) -> None:
         "nrmse_percent_at_depth_every_n": method_to_nrmse_percent_at_depth,
         "abs_mse_at_depth_every_n": method_to_abs_mse_at_depth,
         "cosine_distance_at_depth_every_n": method_to_cosine_distance_at_depth,
-        "per_scale_nrmse_forced": {m: method_ps_nrmse[m].tolist() for m in methods},
-        "per_scale_cos_forced": {m: method_ps_cos[m].tolist() for m in methods},
-        "per_scale_macro_nrmse_forced": {m: method_ps_macro[m].tolist() for m in methods},
     }
+    if not cordic_iters_list:
+        payload["per_scale_nrmse_forced"] = {m: method_ps_nrmse[m].tolist() for m in methods}
+        payload["per_scale_cos_forced"] = {m: method_ps_cos[m].tolist() for m in methods}
+        payload["per_scale_macro_nrmse_forced"] = {m: method_ps_macro[m].tolist() for m in methods}
     if args.cumulative:
         method_to_cum_at_depth: Dict[str, List[float]] = {m: (method_to_cum_at_depth_sum[m] / n_labels).tolist() for m in methods}
         method_to_cum_at_depth_pct = {m: [v * 100.0 for v in vals] for m, vals in method_to_cum_at_depth.items()}
