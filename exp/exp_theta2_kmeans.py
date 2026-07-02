@@ -11,7 +11,7 @@ Codebook is model-specific: fit with the same depth you use at FID time.
 Outputs (per depth):
   configs/codebooks/theta2_kmeans_d<depth>/codebook.json
   artifacts/theta2_kmeans_d<depth>/codebook_vs_uniform.png
-  artifacts/angle_plots/d<depth>/int6_kmeans_int4/k_error_global.png
+  optional artifacts/angle_plots/d<depth>/int6_kmeans_int4/k_error_global.png
 """
 from __future__ import annotations
 
@@ -78,7 +78,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument('--cfg', type=float, default=4.0, help='CFG during θ₂ collection')
     p.add_argument('--seed-base', type=int, default=SEED, help='g_seed = seed_base + class_idx')
-    p.add_argument('--skip-k-error-plot', action='store_true')
+    p.add_argument(
+        '--plot-k-error', action='store_true',
+        help='optional analysis plot after fitting; off by default on FPGA/core branch',
+    )
     p.add_argument(
         '--collect-v', action='store_true',
         help='collect V θ₂ instead of K (for separate V codebook)',
@@ -338,7 +341,7 @@ def main() -> None:
     )
     print(f'codebook plot -> {plot_path}')
 
-    if not args.skip_k_error_plot and not args.collect_v:
+    if args.plot_k_error and not args.collect_v:
         eval_class = class_labels[0]
         out_dir = ARTIFACT_ROOT / 'angle_plots' / f'd{depth}' / config_name
         run_k_error_plot(

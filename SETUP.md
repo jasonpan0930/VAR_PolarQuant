@@ -192,18 +192,20 @@ VAR_PolarQuant/
 ├── vae_ch160v4096z32.pth          # VAE checkpoint
 ├── var_d16.pth                    # VAR-d16 checkpoint
 ├── var_d30.pth                    # VAR-d30 checkpoint (optional)
-├── exp/                           # Experiment scripts
+├── exp/                           # Polar quant scripts
 │   ├── exp_fid_sample.py
 │   ├── exp_theta2_kmeans.py
-│   ├── exp_polar_angle_dist.py
-│   ├── exp_cross_block_cumulative_mse.py
+│   ├── exp_polar_kv_infer.py
+│   ├── verify_fp6_e3m2.py
+│   ├── audit_fp6_e3m2.py
 │   ├── sbatch_fid_sample.sh
 │   └── ...
 ├── utils/                         # Core libraries
 │   ├── polar_kv_quant.py          # Polar encode/decode
 │   ├── angle_quant.py             # Codebooks & configs
 │   ├── theta2_kmeans.py           # K-means codebook
-│   └── polar_angle_viz.py         # Error visualization
+│   ├── cordic.py                  # CORDIC vectoring model
+│   └── polar_angle_viz.py         # Codebook sample collection helpers
 ├── models/                        # Modified VAR model
 │   ├── basic_var.py               # SelfAttention with polar cache
 │   └── var.py                     # enable_polar_k_cache()

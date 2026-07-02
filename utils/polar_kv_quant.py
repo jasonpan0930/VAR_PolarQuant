@@ -148,7 +148,7 @@ def _encode_core(k: torch.Tensor, config: PolarQuantConfig):
 
 
 # =====================================================================
-#  Error breakdown (used by exp_polar_angle_dist.py)
+#  Error breakdown (optional diagnostics / codebook sanity checks)
 # =====================================================================
 
 def _vec_error(k_orig: torch.Tensor, k_hat: torch.Tensor):
