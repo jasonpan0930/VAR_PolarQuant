@@ -1,0 +1,41 @@
+{
+  "centers": [
+    0.6005313372167397,
+    0.6762104394548316,
+    0.7242146613229199,
+    0.7701838308336805,
+    0.8080200392536945,
+    0.8531963450502077,
+    0.8987301860779338,
+    0.9728099644331724
+  ],
+  "meta": {
+    "n_samples": 408000,
+    "n_levels": 8,
+    "seed": 0,
+    "backend": "numpy_lloyd",
+    "inertia": 0.00026963296262044707,
+    "weighted_mse_angle": 0.00026963296262044707,
+    "uniform_mse_angle": 0.00339794124837405,
+    "model_depth": 30,
+    "tree_level": 5,
+    "level_label": "T5",
+    "target_blocks": [
+      7,
+      15,
+      22,
+      29
+    ],
+    "class_labels": [
+      22,
+      45,
+      123,
+      437,
+      701
+    ],
+    "cfg": 4.0,
+    "seed_base": 0,
+    "collect_config": null,
+    "collect_target": "K"
+  }
+}
